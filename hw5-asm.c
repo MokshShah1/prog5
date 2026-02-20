@@ -824,28 +824,6 @@ static void emitLoad64(ItemList *code, uint64_t *pc, int rd, uint64_t value, Pen
     }
 }
 
-static bool isAllDigits(const char *s)
-{
-    const char *p;
-
-    if (s == NULL || *s == '\0')
-    {
-        return false;
-    }
-
-    p = s;
-    while (*p != '\0')
-    {
-        if (isdigit((unsigned char)*p) == 0)
-        {
-            return false;
-        }
-        p++;
-    }
-
-    return true;
-}
-
 static uint32_t packR(uint32_t op, uint32_t rd, uint32_t rs, uint32_t rt)
 {
     uint32_t w;
