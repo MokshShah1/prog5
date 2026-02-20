@@ -1,0 +1,45 @@
+.code
+	ld r1, 0
+	ld r2, 1
+	in r3, r1
+
+	ld r7, 2
+	ld r20, :compute
+	brgt r20, r3, r7
+
+	ld r7, 1
+	ld r20, :print_one
+	brgt r20, r3, r7
+
+	clr r4
+	out r2, r4
+	priv r0, r0, r0, 0
+
+:print_one
+	ld r4, 1
+	out r2, r4
+	priv r0, r0, r0, 0
+
+:compute
+	clr r4
+	ld r5, 1
+
+	mov r6, r3
+	subi r6, 2
+
+	clr r8
+
+:loop_check
+	ld r20, :loop_body
+	brgt r20, r6, r8
+
+	out r2, r5
+	priv r0, r0, r0, 0
+
+:loop_body
+	add r7, r4, r5
+	mov r4, r5
+	mov r5, r7
+	subi r6, 1
+	ld r20, :loop_check
+	br r20

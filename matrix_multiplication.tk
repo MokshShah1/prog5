@@ -1,0 +1,106 @@
+.code
+	ld r1, 0
+	ld r2, 1
+	clr r8
+
+	in r3, r1
+
+	ld r20, :start
+	brgt r20, r3, r8
+	priv r0, r0, r0, 0
+
+:start
+	mul r4, r3, r3
+
+	ld r15, 65536
+
+	clr r6
+
+:readA_check
+	ld r20, :readA_body
+	brgt r20, r4, r6
+	ld r20, :readB_setup
+	br r20
+
+:readA_body
+	in r7, r1
+	mov r11, r6
+	shftli r11, 3
+	add r11, r15, r11
+	mov (r11)(0), r7
+	addi r6, 1
+	ld r20, :readA_check
+	br r20
+
+:readB_setup
+	mov r16, r4
+	shftli r16, 3
+	add r16, r15, r16
+
+	clr r6
+
+:readB_check
+	ld r20, :readB_body
+	brgt r20, r4, r6
+	ld r20, :mul_setup
+	br r20
+
+:readB_body
+	in r7, r1
+	mov r11, r6
+	shftli r11, 3
+	add r11, r16, r11
+	mov (r11)(0), r7
+	addi r6, 1
+	ld r20, :readB_check
+	br r20
+
+:mul_setup
+	clr r5
+
+:i_check
+	ld r20, :i_body
+	brgt r20, r3, r5
+	priv r0, r0, r0, 0
+
+:i_body
+	clr r6
+
+:j_check
+	ld r20, :j_body
+	brgt r20, r3, r6
+	addi r5, 1
+	ld r20, :i_check
+	br r20
+
+:j_body
+	clr r7
+	clr r8
+
+:k_check
+	ld r20, :k_body
+	brgt r20, r3, r7
+	out r2, r8
+	addi r6, 1
+	ld r20, :j_check
+	br r20
+
+:k_body
+	mul r11, r5, r3
+	add r11, r11, r7
+	shftli r11, 3
+	add r11, r15, r11
+	mov r12, (r11)(0)
+
+	mul r13, r7, r3
+	add r13, r13, r6
+	shftli r13, 3
+	add r13, r16, r13
+	mov r14, (r13)(0)
+
+	mulf r12, r12, r14
+	addf r8, r8, r12
+
+	addi r7, 1
+	ld r20, :k_check
+	br r20
