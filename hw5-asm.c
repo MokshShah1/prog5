@@ -1087,10 +1087,13 @@ static uint32_t assembleInstruction(const char *instText, uint64_t pc, const Lab
 
         if (w.items[1][0] == ':' && w.items[1][1] != '\0')
         {
-            if (getLabel(labels, w.items[1] + 1, &target) == false)
+            const char *labelRef = w.items[1] + 1;
+            char *labelCopy = copyText(labelRef);
+
+            if (getLabel(labels, labelRef, &target) == false)
             {
                 freeWords(&w);
-                stopBuildWithName("undefined label reference: %s", w.items[1] + 1);
+                stopBuildWithName("undefined label reference: %s", labelCopy);
             }
 
             {
@@ -1098,6 +1101,7 @@ static uint32_t assembleInstruction(const char *instText, uint64_t pc, const Lab
                 delta = (int64_t)target - (int64_t)(pc + 4);
                 if (delta < -2048 || delta > 2047)
                 {
+                    free(labelCopy);
                     freeWords(&w);
                     stopBuild("brr label out of range for signed 12-bit");
                 }
@@ -1105,6 +1109,7 @@ static uint32_t assembleInstruction(const char *instText, uint64_t pc, const Lab
             }
 
             imm12 = (uint32_t)rel & 0xFFFu;
+            free(labelCopy);
             freeWords(&w);
             return ((0x0Au & 0x1Fu) << 27) | imm12;
         }
@@ -1444,8 +1449,10 @@ static uint32_t assembleInstruction(const char *instText, uint64_t pc, const Lab
         }
     }
 
+    char *mnCopy = copyText(mn);
     freeWords(&w);
-    stopBuildWithName("unknown instruction mnemonic: %s", mn);
+    stopBuildWithName("unknown instruction mnemonic: %s", mnCopy);
+    free(mnCopy);
     return 0;
 }
 
@@ -1510,14 +1517,14 @@ static void buildProgram(const char *inputPath, ItemList *code, ItemList *data, 
             continue;
         }
 
-        if (*line != '\t')
+        if (isspace((unsigned char)*line) == 0)
         {
             fclose(f);
             pendingFree(&pending);
-            stopBuild("code/data line must start with tab character");
+            stopBuild("code/data line must start with whitespace");
         }
 
-        while (*line == '\t')
+        while (*line != '\0' && isspace((unsigned char)*line) != 0)
         {
             line++;
         }
@@ -1751,15 +1758,18 @@ static void buildProgram(const char *inputPath, ItemList *code, ItemList *data, 
                 if (w.items[2][0] == ':' && w.items[2][1] != '\0')
                 {
                     uint64_t addr;
+                    const char *labelRef = w.items[2] + 1;
+                    char *labelCopy = copyText(labelRef);
 
-                    if (getLabel(labels, w.items[2] + 1, &addr) == false)
+                    if (getLabel(labels, labelRef, &addr) == false)
                     {
                         freeWords(&w);
                         fclose(f);
                         pendingFree(&pending);
-                        stopBuildWithName("ld: undefined label: %s", w.items[2] + 1);
+                        stopBuildWithName("ld: undefined label: %s", labelCopy);
                     }
 
+                    free(labelCopy);
                     freeWords(&w);
                     emitLoad64(code, &codePc, rd, addr, &pending, labels);
                     continue;
@@ -1830,11 +1840,11 @@ static uint32_t *assembleAll(const ItemList *code, const LabelTable *labels)
 static void writeTko(const char *outPath, const ItemList *code, const ItemList *data, const uint32_t *words)
 {
     FILE *f;
-    uint64_t fileType;
-    uint64_t codeBegin;
-    uint64_t codeSize;
-    uint64_t dataBegin;
-    uint64_t dataSize;
+    uint32_t fileType;
+    uint32_t codeBegin;
+    uint32_t codeSize;
+    uint32_t dataBegin;
+    uint32_t dataSize;
     size_t i;
 
     f = fopen(outPath, "wb");
@@ -1843,17 +1853,17 @@ static void writeTko(const char *outPath, const ItemList *code, const ItemList *
         stopBuildWithName("cannot open output file: %s", outPath);
     }
 
-    fileType = 0ULL;
-    codeBegin = codeBase;
-    codeSize = (uint64_t)(code->count * 4ULL);
-    dataBegin = dataBase;
-    dataSize = (uint64_t)(data->count * 8ULL);
+    fileType = 0u;
+    codeBegin = (uint32_t)codeBase;
+    codeSize = (uint32_t)(code->count * 4u);
+    dataBegin = (uint32_t)dataBase;
+    dataSize = (uint32_t)(data->count * 8u);
 
-    writeU64LE(f, fileType);
-    writeU64LE(f, codeBegin);
-    writeU64LE(f, codeSize);
-    writeU64LE(f, dataBegin);
-    writeU64LE(f, dataSize);
+    writeU32LE(f, fileType);
+    writeU32LE(f, codeBegin);
+    writeU32LE(f, codeSize);
+    writeU32LE(f, dataBegin);
+    writeU32LE(f, dataSize);
 
     i = 0;
     while (i < code->count)
