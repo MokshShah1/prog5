@@ -1088,10 +1088,10 @@ static uint32_t assembleInstruction(const char *instText, uint64_t pc, const Lab
         if (w.items[1][0] == ':' && w.items[1][1] != '\0')
         {
             const char *labelRef = w.items[1] + 1;
-            char *labelCopy = copyText(labelRef);
 
             if (getLabel(labels, labelRef, &target) == false)
             {
+                char *labelCopy = copyText(labelRef);
                 freeWords(&w);
                 stopBuildWithName("undefined label reference: %s", labelCopy);
             }
@@ -1101,7 +1101,6 @@ static uint32_t assembleInstruction(const char *instText, uint64_t pc, const Lab
                 delta = (int64_t)target - (int64_t)(pc + 4);
                 if (delta < -2048 || delta > 2047)
                 {
-                    free(labelCopy);
                     freeWords(&w);
                     stopBuild("brr label out of range for signed 12-bit");
                 }
@@ -1109,7 +1108,6 @@ static uint32_t assembleInstruction(const char *instText, uint64_t pc, const Lab
             }
 
             imm12 = (uint32_t)rel & 0xFFFu;
-            free(labelCopy);
             freeWords(&w);
             return ((0x0Au & 0x1Fu) << 27) | imm12;
         }
@@ -1449,10 +1447,12 @@ static uint32_t assembleInstruction(const char *instText, uint64_t pc, const Lab
         }
     }
 
-    char *mnCopy = copyText(mn);
-    freeWords(&w);
-    stopBuildWithName("unknown instruction mnemonic: %s", mnCopy);
-    free(mnCopy);
+    {
+        char *mnCopy = copyText(mn);
+        freeWords(&w);
+        stopBuildWithName("unknown instruction mnemonic: %s", mnCopy);
+    }
+
     return 0;
 }
 
@@ -1486,44 +1486,46 @@ static void buildProgram(const char *inputPath, ItemList *code, ItemList *data, 
         cutComment(raw);
         trimEnd(raw);
 
-        const char *line;
-        line = raw;
-
-        line = skipBlank(line);
-        if (*line == '\0')
+        const char *line0 = raw;
+        const char *trimmed = skipBlank(line0);
+        if (*trimmed == '\0')
         {
             continue;
         }
 
-        if (startsWith(line, ".code"))
+        if (raw[0] == '.')
         {
-            mode = sectionCode;
-            sawCode = true;
-            continue;
+            if (startsWith(raw, ".code"))
+            {
+                mode = sectionCode;
+                sawCode = true;
+                continue;
+            }
+            if (startsWith(raw, ".data"))
+            {
+                mode = sectionData;
+                continue;
+            }
+            stopBuild("unknown directive");
         }
 
-        if (startsWith(line, ".data"))
-        {
-            mode = sectionData;
-            continue;
-        }
-
-        if (*line == ':')
+        if (raw[0] == ':')
         {
             char *name;
-            name = readLabelToken(line);
+            name = readLabelToken(raw);
             pendingAdd(&pending, name);
             free(name);
             continue;
         }
 
-        if (isspace((unsigned char)*line) == 0)
+        if (isspace((unsigned char)raw[0]) == 0)
         {
             fclose(f);
             pendingFree(&pending);
             stopBuild("code/data line must start with whitespace");
         }
 
+        const char *line = raw;
         while (*line != '\0' && isspace((unsigned char)*line) != 0)
         {
             line++;
@@ -1759,17 +1761,16 @@ static void buildProgram(const char *inputPath, ItemList *code, ItemList *data, 
                 {
                     uint64_t addr;
                     const char *labelRef = w.items[2] + 1;
-                    char *labelCopy = copyText(labelRef);
 
                     if (getLabel(labels, labelRef, &addr) == false)
                     {
+                        char *labelCopy = copyText(labelRef);
                         freeWords(&w);
                         fclose(f);
                         pendingFree(&pending);
                         stopBuildWithName("ld: undefined label: %s", labelCopy);
                     }
 
-                    free(labelCopy);
                     freeWords(&w);
                     emitLoad64(code, &codePc, rd, addr, &pending, labels);
                     continue;
