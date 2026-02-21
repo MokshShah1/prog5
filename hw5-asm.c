@@ -62,15 +62,6 @@ static void cutComment(char *s)
     }
 }
 
-static const char *skipSpacesOnly(const char *s)
-{
-    while (*s != '\0' && (*s == ' ' || *s == '\r' || *s == '\n'))
-    {
-        s++;
-    }
-    return s;
-}
-
 static const char *skipBlank(const char *s)
 {
     while (*s != '\0' && isspace((unsigned char)*s) != 0)
