@@ -874,9 +874,7 @@ static uint32_t assembleInstruction(const char *instText, uint64_t pc, const Lab
                 stopBuildWithName("undefined label reference: %s", labelCopy);
             }
 
-            int64_t delta =
-                (int64_t)target -
-                (int64_t)(codeBase + pc + 4);
+            int64_t delta = (int64_t)target - (int64_t)(pc + 4);
             if (delta < -2048 || delta > 2047)
             {
                 free(labelCopy);
@@ -1524,10 +1522,7 @@ static uint32_t *assembleAll(const ItemList *code, const LabelTable *labels)
 
     for (size_t i = 0; i < code->count; i++)
     {
-        uint64_t relativePc = (uint64_t)(i * 4);
-        out[i] = assembleInstruction(code->items[i].text,
-                                     relativePc,
-                                     labels);
+        out[i] = assembleInstruction(code->items[i].text, code->items[i].address, labels);
     }
 
     return out;
@@ -1541,17 +1536,17 @@ static void writeTko(const char *outPath, const ItemList *code, const ItemList *
         stopBuildWithName("cannot open output file: %s", outPath);
     }
 
-    uint32_t fileType = 0U;
-    uint32_t codeBegin = (uint32_t)codeBase;
-    uint32_t codeSize = (uint32_t)(code->count * 4U);
-    uint32_t dataBegin = (uint32_t)dataBase;
-    uint32_t dataSize = (uint32_t)(data->count * 8U);
+    uint64_t fileType = 0ULL;
+    uint64_t codeBegin = codeBase;
+    uint64_t codeSize = (uint64_t)(code->count * 4ULL);
+    uint64_t dataBegin = dataBase;
+    uint64_t dataSize = (uint64_t)(data->count * 8ULL);
 
-    writeU32LE(f, fileType);
-    writeU32LE(f, codeBegin);
-    writeU32LE(f, codeSize);
-    writeU32LE(f, dataBegin);
-    writeU32LE(f, dataSize);
+    writeU64LE(f, fileType);
+    writeU64LE(f, codeBegin);
+    writeU64LE(f, codeSize);
+    writeU64LE(f, dataBegin);
+    writeU64LE(f, dataSize);
 
     for (size_t i = 0; i < code->count; i++)
     {
