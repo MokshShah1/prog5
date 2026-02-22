@@ -566,12 +566,6 @@ static void addDataLiteral(ItemList *data, uint64_t addr, uint64_t value, Pendin
     pushItem(data, (Item){.kind = itemData, .address = addr, .text = NULL, .data = value});
 }
 
-static void addDataLabel(ItemList *data, uint64_t addr, const char *labelName, PendingLabels *pending, LabelTable *labels)
-{
-    pendingResolve(pending, labels, addr);
-    pushItem(data, (Item){.kind = itemData, .address = addr, .text = copyText(labelName), .data = 0});
-}
-
 static void emitClear(ItemList *code, uint64_t *pc, int rd, PendingLabels *pending, LabelTable *labels)
 {
     char line[64];
@@ -1267,19 +1261,21 @@ static void buildProgram(const char *inputPath, ItemList *code, ItemList *data, 
         {
             if (*p == ':' && p[1] != '\0')
             {
-                addDataLabel(data, dataPc, p + 1, &pending, labels);
+                char *name = readLabelToken(p);
+                pendingAdd(&pending, name);
+                free(name);
+                continue;
             }
-            else
+
+            uint64_t v = 0;
+            if (readU64Token(p, &v) == false)
             {
-                uint64_t v = 0;
-                if (readU64Token(p, &v) == false)
-                {
-                    fclose(f);
-                    pendingFree(&pending);
-                    stopBuild("malformed data item (expected 64-bit unsigned integer)");
-                }
-                addDataLiteral(data, dataPc, v, &pending, labels);
+                fclose(f);
+                pendingFree(&pending);
+                stopBuild("malformed data item (expected 64-bit unsigned integer)");
             }
+            addDataLiteral(data, dataPc, v, &pending, labels);
+
             dataPc += 8;
             continue;
         }
@@ -1536,17 +1532,17 @@ static void writeTko(const char *outPath, const ItemList *code, const ItemList *
         stopBuildWithName("cannot open output file: %s", outPath);
     }
 
-    uint32_t fileType = 0u;
-    uint32_t codeBegin = (uint32_t)codeBase;
-    uint32_t codeSize = (uint32_t)(code->count * 4u);
-    uint32_t dataBegin = (uint32_t)dataBase;
-    uint32_t dataSize = (uint32_t)(data->count * 8u);
+    uint64_t fileType = 0ULL;
+    uint64_t codeBegin = codeBase;
+    uint64_t codeSize = (uint64_t)(code->count * 4ULL);
+    uint64_t dataBegin = dataBase;
+    uint64_t dataSize = (uint64_t)(data->count * 8ULL);
 
-    writeU32LE(f, fileType);
-    writeU32LE(f, codeBegin);
-    writeU32LE(f, codeSize);
-    writeU32LE(f, dataBegin);
-    writeU32LE(f, dataSize);
+    writeU64LE(f, fileType);
+    writeU64LE(f, codeBegin);
+    writeU64LE(f, codeSize);
+    writeU64LE(f, dataBegin);
+    writeU64LE(f, dataSize);
 
     for (size_t i = 0; i < code->count; i++)
     {
