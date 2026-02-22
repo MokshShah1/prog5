@@ -655,6 +655,7 @@ static uint32_t packP(uint32_t op, uint32_t rd, uint32_t rs, uint32_t rt, uint32
 }
 static uint32_t assembleInstruction(const char *instText, uint64_t pc, const LabelTable *labels)
 {
+    (void)pc;
     (void)labels; // labels are NOT used in this assembler (brr does NOT take labels)
 
     Words w = splitLine(instText);
