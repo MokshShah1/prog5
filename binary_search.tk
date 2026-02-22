@@ -1,111 +1,89 @@
 .code
-
-ld r1, 0        ; Input port
-ld r2, 3        ; Output port (ASCII port for stage 3)
-clr r8
-
-in r3, r1       ; Read N (number of elements)
-ld r15, 65536   ; Base address for the array
-clr r6          ; Counter for reading array
-
+	ld r1, 0
+	ld r2, 3
+	clr r8
+	in r3, r1
+	ld r15, 65536
+	clr r6
 :read_check
-ld r20, :read_body
-brgt r20, r3, r6
-ld r20, :after_read
-br r20
-
+	ld r20, :read_body
+	brgt r20, r3, r6
+	ld r20, :after_read
+	br r20
 :read_body
-in r7, r1
-mov r11, r6
-shftli r11, 3         ; multiply counter by 8 for 64-bit addressing
-add r11, r15, r11
-mov (r11)(0), r7      ; Store array element
-addi r6, 1            ; Increment counter
-ld r20, :read_check
-br r20
-
+	in r7, r1
+	mov r11, r6
+	shftli r11, 3
+	add r11, r15, r11
+	mov (r11)(0), r7
+	addi r6, 1
+	ld r20, :read_check
+	br r20
 :after_read
-in r4, r1             ; INTERACTIVE LOOP START: Read search query
-ld r20, :bs_start
-brgt r20, r3, r8      ; Check if N > 0
-ld r20, :print_not_found
-br r20                ; If array is empty, it's immediately not found
-
+	in r4, r1
+	ld r20, :bs_start
+	brgt r20, r3, r8
+	ld r20, :print_not_found
+	br r20
 :bs_start
-clr r5                ; left = 0
-mov r6, r3
-subi r6, 1            ; right = N - 1
-
+	clr r5
+	mov r6, r3
+	subi r6, 1
 :bs_check
-ld r20, :print_not_found
-brgt r20, r5, r6      ; if left > right, we didn't find it
-
-mov r7, r5
-add r7, r7, r6
-shftri r7, 1          ; mid = (left + right) / 2 (Your efficient shift method!)
-
-mov r11, r7
-shftli r11, 3
-add r11, r15, r11
-mov r9, (r11)(0)      ; Load arr[mid]
-
-ld r20, :go_right
-brgt r20, r4, r9      ; if query > arr[mid]
-ld r20, :go_left
-brgt r20, r9, r4      ; if arr[mid] > query
-
-; If neither is strictly greater, they are equal!
-ld r20, :print_found
-br r20
-
+	ld r20, :print_not_found
+	brgt r20, r5, r6
+	mov r7, r5
+	add r7, r7, r6
+	shftri r7, 1
+	mov r11, r7
+	shftli r11, 3
+	add r11, r15, r11
+	mov r9, (r11)(0)
+	ld r20, :go_right
+	brgt r20, r4, r9
+	ld r20, :go_left
+	brgt r20, r9, r4
+	ld r20, :print_found
+	br r20
 :go_right
-mov r5, r7
-addi r5, 1            ; left = mid + 1
-ld r20, :bs_check
-br r20
-
+	mov r5, r7
+	addi r5, 1
+	ld r20, :bs_check
+	br r20
 :go_left
-mov r6, r7
-subi r6, 1            ; right = mid - 1
-ld r20, :bs_check
-br r20
-
+	mov r6, r7
+	subi r6, 1
+	ld r20, :bs_check
+	br r20
 :print_found
-ld r10, 102           ; 'f'
-out r10, r2
-ld r10, 111           ; 'o'
-out r10, r2
-ld r10, 117           ; 'u'
-out r10, r2
-ld r10, 110           ; 'n'
-out r10, r2
-ld r10, 100           ; 'd'
-out r10, r2
-ld r10, 10            ; '\n'
-out r10, r2
-ld r20, :after_read   ; Jump back to wait for the next query
-br r20
-
+	ld r10, 102
+	out r2, r10
+	ld r10, 111
+	out r2, r10
+	ld r10, 117
+	out r2, r10
+	ld r10, 110
+	out r2, r10
+	ld r10, 100
+	out r2, r10
+	halt
 :print_not_found
-ld r10, 110           ; 'n'
-out r10, r2
-ld r10, 111           ; 'o'
-out r10, r2
-ld r10, 116           ; 't'
-out r10, r2
-ld r10, 32            ; ' '
-out r10, r2
-ld r10, 102           ; 'f'
-out r10, r2
-ld r10, 111           ; 'o'
-out r10, r2
-ld r10, 117           ; 'u'
-out r10, r2
-ld r10, 110           ; 'n'
-out r10, r2
-ld r10, 100           ; 'd'
-out r10, r2
-ld r10, 10            ; '\n'
-out r10, r2
-ld r20, :after_read   ; Jump back to wait for the next query
-br r20
+	ld r10, 110
+	out r2, r10
+	ld r10, 111
+	out r2, r10
+	ld r10, 116
+	out r2, r10
+	ld r10, 32
+	out r2, r10
+	ld r10, 102
+	out r2, r10
+	ld r10, 111
+	out r2, r10
+	ld r10, 117
+	out r2, r10
+	ld r10, 110
+	out r2, r10
+	ld r10, 100
+	out r2, r10
+	halt
