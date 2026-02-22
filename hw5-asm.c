@@ -702,6 +702,9 @@ static bool parseMemOperandParen(const char *tok, int *outBase, int32_t *outImm)
     int32_t immS = 0;
     if (!readI12Token(immTok, &immS))
         return false;
+    /* 64-bit moves must be 8-byte aligned */
+    if ((immS & 7) != 0)
+        return false;
 
     *outBase = base;
     *outImm = immS;
@@ -1088,7 +1091,11 @@ static uint32_t assembleInstruction(const char *instText, uint64_t pc, const Lab
                     freeWords(w);
                     stopBuild("mov store imm must fit signed 12-bit");
                 }
-
+                if ((immS & 7) != 0)
+                {
+                    freeWords(w);
+                    stopBuild("mov store offset must be multiple of 8");
+                }
                 int src = readReg(right);
                 if (src < 0)
                 {
@@ -1150,6 +1157,11 @@ static uint32_t assembleInstruction(const char *instText, uint64_t pc, const Lab
                 {
                     freeWords(w);
                     stopBuild("mov load imm must fit signed 12-bit");
+                }
+                if ((immS & 7) != 0)
+                {
+                    freeWords(w);
+                    stopBuild("mov load offset must be multiple of 8");
                 }
 
                 freeWords(w);
@@ -1368,6 +1380,16 @@ static void buildProgram(const char *inputPath, ItemList *code, ItemList *data, 
 
         if (strcmp(mnemonic, "halt") == 0)
         {
+            Words ww = splitLine(p);
+            if (ww.count != 1)
+            {
+                freeWords(ww);
+                fclose(f);
+                pendingFree(&pending);
+                stopBuild("halt expects no operands");
+            }
+            freeWords(ww);
+
             emitHalt(code, &codePc, &pending, labels);
             continue;
         }
