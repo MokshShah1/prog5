@@ -1,3 +1,4 @@
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -357,8 +358,8 @@ typedef struct
 {
     ItemKind kind;
     uint64_t address;
-    char *text;    // for INSTR: instruction text; for DATA: if non-NULL = label name to resolve
-    uint64_t data; // for DATA literals
+    char *text;    // for instruction: full text; for data: optional label-name or ":label" reference
+    uint64_t data; // for data literal
 } Item;
 
 typedef struct
@@ -564,11 +565,12 @@ static void addDataLiteral(ItemList *data, uint64_t addr, uint64_t value, Pendin
     pendingResolve(pending, labels, addr);
     pushItem(data, (Item){.kind = itemData, .address = addr, .text = NULL, .data = value});
 }
-static void addDataLabelRef(ItemList *data, uint64_t addr, const char *labelName,
-                            PendingLabels *pending, LabelTable *labels)
+
+static void addDataLabelRef(ItemList *data, uint64_t addr, char *labelNameOwned, PendingLabels *pending, LabelTable *labels)
 {
     pendingResolve(pending, labels, addr);
-    pushItem(data, (Item){.kind = itemData, .address = addr, .text = copyText(labelName), .data = 0});
+    // store label name (no leading ':') in text, resolve later during write
+    pushItem(data, (Item){.kind = itemData, .address = addr, .text = labelNameOwned, .data = 0});
 }
 
 static void emitClear(ItemList *code, uint64_t *pc, int rd, PendingLabels *pending, LabelTable *labels)
@@ -623,6 +625,45 @@ static void emitPop(ItemList *code, uint64_t *pc, int rd, PendingLabels *pending
     *pc += 4;
 }
 
+static void emitLoad64(ItemList *code, uint64_t *pc, int rd, uint64_t value, PendingLabels *pending, LabelTable *labels)
+{
+    const int shifts[5] = {12, 12, 12, 12, 4};
+    const int offs[5] = {40, 28, 16, 4, 0};
+
+    {
+        char line[64];
+        snprintf(line, sizeof(line), "xor r%d, r%d, r%d", rd, rd, rd);
+        addText(code, *pc, line, pending, labels);
+        *pc += 4;
+    }
+
+    {
+        char line[64];
+        uint64_t top = (value >> 52) & 0xFFFULL;
+        snprintf(line, sizeof(line), "addi r%d, %llu", rd, (unsigned long long)top);
+        addText(code, *pc, line, pending, labels);
+        *pc += 4;
+    }
+
+    for (int i = 0; i < 5; i++)
+    {
+        {
+            char line[64];
+            snprintf(line, sizeof(line), "shftli r%d, %d", rd, shifts[i]);
+            addText(code, *pc, line, pending, labels);
+            *pc += 4;
+        }
+
+        {
+            char line[64];
+            uint64_t part = (i == 4) ? (value & 0xFULL) : ((value >> (uint64_t)offs[i]) & 0xFFFULL);
+            snprintf(line, sizeof(line), "addi r%d, %llu", rd, (unsigned long long)part);
+            addText(code, *pc, line, pending, labels);
+            *pc += 4;
+        }
+    }
+}
+
 static uint32_t packR(uint32_t op, uint32_t rd, uint32_t rs, uint32_t rt)
 {
     uint32_t w = 0;
@@ -653,11 +694,9 @@ static uint32_t packP(uint32_t op, uint32_t rd, uint32_t rs, uint32_t rt, uint32
     w |= (imm12 & 0xFFFu);
     return w;
 }
+
 static uint32_t assembleInstruction(const char *instText, uint64_t pc, const LabelTable *labels)
 {
-    (void)pc;
-    (void)labels; // labels are NOT used in this assembler (brr does NOT take labels)
-
     Words w = splitLine(instText);
     if (w.count == 0)
     {
@@ -814,7 +853,6 @@ static uint32_t assembleInstruction(const char *instText, uint64_t pc, const Lab
             stopBuild("brr expects rd or imm");
         }
 
-        // register form
         int r = readReg(w.items[1]);
         if (r >= 0)
         {
@@ -822,22 +860,40 @@ static uint32_t assembleInstruction(const char *instText, uint64_t pc, const Lab
             return packR(0x09, (uint32_t)r, 0, 0);
         }
 
-        // IMPORTANT: brr does NOT accept labels in this autograder
-        if (w.items[1][0] == ':')
+        int32_t rel;
+        uint32_t imm12;
+        uint64_t target;
+
+        if (w.items[1][0] == ':' && w.items[1][1] != '\0')
         {
+            const char *labelRef = w.items[1] + 1;
+
+            if (getLabel(labels, labelRef, &target) == false)
+            {
+                freeWords(&w);
+                stopBuildWithName("undefined label reference: %s", labelRef);
+            }
+
+            int64_t delta = (int64_t)target - (int64_t)pc;
+            if (delta < -2048 || delta > 2047)
+            {
+                freeWords(&w);
+                stopBuild("brr label out of range for signed 12-bit");
+            }
+
+            rel = (int32_t)delta;
+            imm12 = (uint32_t)rel & 0xFFFu;
             freeWords(&w);
-            stopBuild("brr immediate must fit signed 12-bit");
+            return ((0x0Au & 0x1Fu) << 27) | imm12;
         }
 
-        // immediate form (signed 12-bit)
-        int32_t rel;
         if (readI12Token(w.items[1], &rel) == false)
         {
             freeWords(&w);
             stopBuild("brr immediate must fit signed 12-bit");
         }
 
-        uint32_t imm12 = (uint32_t)rel & 0xFFFu;
+        imm12 = (uint32_t)rel & 0xFFFu;
         freeWords(&w);
         return ((0x0Au & 0x1Fu) << 27) | imm12;
     }
@@ -956,7 +1012,6 @@ static uint32_t assembleInstruction(const char *instText, uint64_t pc, const Lab
         const char *left = w.items[1];
         const char *right = w.items[2];
 
-        // store: mov (base)(imm), rs
         if (left[0] == '(')
         {
             const char *p = left + 1;
@@ -1029,7 +1084,6 @@ static uint32_t assembleInstruction(const char *instText, uint64_t pc, const Lab
             return packP(0x13, (uint32_t)base, (uint32_t)src, 0, (uint32_t)imm & 0xFFFu);
         }
 
-        // load: mov rd, (base)(imm)
         if (right[0] == '(')
         {
             int dst = readReg(left);
@@ -1102,7 +1156,6 @@ static uint32_t assembleInstruction(const char *instText, uint64_t pc, const Lab
             return packP(0x10, (uint32_t)dst, (uint32_t)base, 0, (uint32_t)imm & 0xFFFu);
         }
 
-        // mov rd, rs   OR   mov rd, L
         {
             int dst = readReg(left);
             if (dst < 0)
@@ -1130,9 +1183,8 @@ static uint32_t assembleInstruction(const char *instText, uint64_t pc, const Lab
         }
     }
 
-    char *mnCopy = copyText(mn);
     freeWords(&w);
-    stopBuildWithName("unknown instruction mnemonic: %s", mnCopy);
+    stopBuild("unknown instruction mnemonic");
     return 0;
 }
 
@@ -1176,7 +1228,6 @@ static void buildProgram(const char *inputPath, ItemList *code, ItemList *data, 
             continue;
         }
 
-        /* label definitions are always lines that start with ':' at the start of the line */
         if (*p == ':')
         {
             char *name = readLabelToken(p);
@@ -1211,10 +1262,20 @@ static void buildProgram(const char *inputPath, ItemList *code, ItemList *data, 
 
         if (mode == sectionData)
         {
-            // In .data, a tab-indented ":label" is a DATA ITEM that stores the label's address.
+            // support label definition inside tabbed region (same as you had)
             if (*p == ':' && p[1] != '\0')
             {
-                addDataLabelRef(data, dataPc, p + 1, &pending, labels);
+                // IMPORTANT: In .data, ":name" can mean either:
+                // 1) label definition (if line is just ":name" with no other stuff), OR
+                // 2) data value label reference (store address of label)
+                //
+                // Here, since p is the whole remainder of the line, we treat it as:
+                // - a label definition ONLY if the original line began with ':' (handled earlier)
+                // - otherwise, it's a data VALUE label ref
+                //
+                // So here: treat it as data value label reference.
+                char *refName = readLabelToken(p);
+                addDataLabelRef(data, dataPc, refName, &pending, labels);
                 dataPc += 8;
                 continue;
             }
@@ -1224,15 +1285,13 @@ static void buildProgram(const char *inputPath, ItemList *code, ItemList *data, 
             {
                 fclose(f);
                 pendingFree(&pending);
-                stopBuild("malformed data item (expected 64-bit unsigned integer)");
+                stopBuild("malformed data item (expected 64-bit unsigned integer or :label)");
             }
             addDataLiteral(data, dataPc, v, &pending, labels);
-
             dataPc += 8;
             continue;
         }
 
-        /* code section: unchanged */
         Words w = splitLine(p);
         if (w.count == 0)
         {
@@ -1387,11 +1446,56 @@ static void buildProgram(const char *inputPath, ItemList *code, ItemList *data, 
             continue;
         }
 
-        /* IMPORTANT:
-           Your ld macro section can remain exactly as you had it.
-           If you still resolve labels early there, it can break forward refs.
-           But your failing tests were the .data :label issue.
-        */
+        if (strcmp(mn, "ld") == 0)
+        {
+            if (w.count != 3)
+            {
+                freeWords(&w);
+                fclose(f);
+                pendingFree(&pending);
+                stopBuild("ld expects: ld rd, valueOrLabel");
+            }
+
+            int rd = readReg(w.items[1]);
+            if (rd < 0)
+            {
+                freeWords(&w);
+                fclose(f);
+                pendingFree(&pending);
+                stopBuild("ld: invalid register");
+            }
+
+            if (w.items[2][0] == ':' && w.items[2][1] != '\0')
+            {
+                uint64_t addr;
+                const char *labelRef = w.items[2] + 1;
+
+                if (getLabel(labels, labelRef, &addr) == false)
+                {
+                    freeWords(&w);
+                    fclose(f);
+                    pendingFree(&pending);
+                    stopBuildWithName("ld: undefined label: %s", labelRef);
+                }
+
+                freeWords(&w);
+                emitLoad64(code, &codePc, rd, addr, &pending, labels);
+                continue;
+            }
+
+            uint64_t imm = 0;
+            if (readU64Token(w.items[2], &imm) == false)
+            {
+                freeWords(&w);
+                fclose(f);
+                pendingFree(&pending);
+                stopBuild("ld: invalid literal");
+            }
+
+            freeWords(&w);
+            emitLoad64(code, &codePc, rd, imm, &pending, labels);
+            continue;
+        }
 
         freeWords(&w);
         addText(code, codePc, p, &pending, labels);
@@ -1460,10 +1564,11 @@ static void writeTko(const char *outPath, const ItemList *code, const ItemList *
         if (data->items[i].text != NULL)
         {
             uint64_t addr;
-            if (getLabel(labels, data->items[i].text, &addr) == false)
+            const char *name = data->items[i].text; // stored without ':'
+            if (getLabel(labels, name, &addr) == false)
             {
                 fclose(f);
-                stopBuildWithName("undefined label reference: %s", data->items[i].text);
+                stopBuildWithName("undefined label reference in data: %s", name);
             }
             writeU64LE(f, addr);
         }
