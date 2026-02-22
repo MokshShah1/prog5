@@ -357,7 +357,7 @@ typedef struct
 {
     ItemKind kind;
     uint64_t address;
-    char *text;    // for instructions OR for data label references
+    char *text;    // for instruction: raw text; for data: label name if label-ref, else NULL
     uint64_t data; // for data literal
 } Item;
 
@@ -565,12 +565,14 @@ static void addDataLiteral(ItemList *data, uint64_t addr, uint64_t value, Pendin
     pushItem(data, (Item){.kind = itemData, .address = addr, .text = NULL, .data = value});
 }
 
-// ✅ NEW: support ".data \t:label" meaning "store address(label) as the 64-bit data"
-static void addDataLabel(ItemList *data, uint64_t addr, const char *labelName, PendingLabels *pending, LabelTable *labels)
+static void addDataLabelRef(ItemList *data, uint64_t addr, const char *labelNameNoColon,
+                            PendingLabels *pending, LabelTable *labels)
 {
     pendingResolve(pending, labels, addr);
-    pushItem(data, (Item){.kind = itemData, .address = addr, .text = copyText(labelName), .data = 0});
+    pushItem(data, (Item){.kind = itemData, .address = addr, .text = copyText(labelNameNoColon), .data = 0});
 }
+
+/* ---------- Macro emitters ---------- */
 
 static void emitClear(ItemList *code, uint64_t *pc, int rd, PendingLabels *pending, LabelTable *labels)
 {
@@ -662,6 +664,8 @@ static void emitLoad64(ItemList *code, uint64_t *pc, int rd, uint64_t value, Pen
         }
     }
 }
+
+/* ---------- Encoding helpers ---------- */
 
 static uint32_t packR(uint32_t op, uint32_t rd, uint32_t rs, uint32_t rt)
 {
@@ -1186,7 +1190,6 @@ static uint32_t assembleInstruction(const char *instText, uint64_t pc, const Lab
     stopBuild("unknown instruction mnemonic");
     return 0;
 }
-
 static void buildProgram(const char *inputPath, ItemList *code, ItemList *data, LabelTable *labels)
 {
     FILE *f = fopen(inputPath, "r");
@@ -1261,22 +1264,16 @@ static void buildProgram(const char *inputPath, ItemList *code, ItemList *data, 
 
         if (mode == sectionData)
         {
-            // label definition line inside .data
-            if (*p == ':' && p[1] != '\0')
+            /* FIX: a tabbed ":label" in .data is a DATA ITEM (address-of-label), not a label definition */
+            if (*p == ':')
             {
-                // Is it a label definition token? If it's just ":name" and nothing else on line, treat as definition
-                // Here we treat ANY ":name" line as pending label definition only if it's coming as the whole content,
-                // but data lines can also be ":name" meaning "store address(name)".
-                // The reference implementation supports data items that start with ':' to mean a label *value*. :contentReference[oaicite:1]{index=1}
-
-                // If it's exactly a label token (no spaces), it's ambiguous. We'll follow the HW's intended meaning:
-                // - top-level ":name" lines (not tabbed) are definitions (already handled above)
-                // - tabbed ".data" lines that are ":name" are DATA VALUES (label references)
-
-                // So: in .data mode after tab, ":name" => data value label reference.
-                char *name = readLabelToken(p);
-                addDataLabel(data, dataPc, name, &pending, labels);
-                free(name);
+                if (p[1] == '\0')
+                {
+                    fclose(f);
+                    pendingFree(&pending);
+                    stopBuild("malformed data label reference");
+                }
+                addDataLabelRef(data, dataPc, p + 1, &pending, labels);
                 dataPc += 8;
                 continue;
             }
@@ -1286,7 +1283,7 @@ static void buildProgram(const char *inputPath, ItemList *code, ItemList *data, 
             {
                 fclose(f);
                 pendingFree(&pending);
-                stopBuild("malformed data item (expected 64-bit unsigned integer or :label)");
+                stopBuild("malformed data item (expected 64-bit unsigned integer)");
             }
             addDataLiteral(data, dataPc, v, &pending, labels);
             dataPc += 8;
@@ -1470,15 +1467,17 @@ static void buildProgram(const char *inputPath, ItemList *code, ItemList *data, 
             {
                 uint64_t addr;
                 const char *labelRef = w.items[2] + 1;
+                char *labelCopy = copyText(labelRef);
 
                 if (getLabel(labels, labelRef, &addr) == false)
                 {
                     freeWords(&w);
                     fclose(f);
                     pendingFree(&pending);
-                    stopBuildWithName("ld: undefined label: %s", labelRef);
+                    stopBuildWithName("ld: undefined label: %s", labelCopy);
                 }
 
+                free(labelCopy);
                 freeWords(&w);
                 emitLoad64(code, &codePc, rd, addr, &pending, labels);
                 continue;
