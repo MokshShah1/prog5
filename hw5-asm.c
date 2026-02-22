@@ -623,47 +623,6 @@ static void emitPop(ItemList *code, uint64_t *pc, int rd, PendingLabels *pending
     *pc += 4;
 }
 
-static void emitLoad64(ItemList *code, uint64_t *pc, int rd, uint64_t value, PendingLabels *pending, LabelTable *labels)
-{
-    const int shifts[5] = {12, 12, 12, 12, 4};
-    const int offs[5] = {40, 28, 16, 4, 0};
-
-    {
-        char line[64];
-        snprintf(line, sizeof(line), "xor r%d, r%d, r%d", rd, rd, rd);
-        addText(code, *pc, line, pending, labels);
-        *pc += 4;
-    }
-
-    {
-        char line[64];
-        uint64_t top = (value >> 52) & 0xFFFULL;
-        snprintf(line, sizeof(line), "addi r%d, %llu", rd, (unsigned long long)top);
-        addText(code, *pc, line, pending, labels);
-        *pc += 4;
-    }
-
-    for (int i = 0; i < 5; i++)
-    {
-        {
-            char line[64];
-            snprintf(line, sizeof(line), "shftli r%d, %d", rd, shifts[i]);
-            addText(code, *pc, line, pending, labels);
-            *pc += 4;
-        }
-
-        {
-            char line[64];
-            uint64_t part = (i == 4) ? (value & 0xFULL) : ((value >> (uint64_t)offs[i]) & 0xFFFULL);
-            snprintf(line, sizeof(line), "addi r%d, %llu", rd, (unsigned long long)part);
-            addText(code, *pc, line, pending, labels);
-            *pc += 4;
-        }
-    }
-}
-
-/* ---- Instruction packing / assembling (unchanged from your version) ---- */
-
 static uint32_t packR(uint32_t op, uint32_t rd, uint32_t rs, uint32_t rt)
 {
     uint32_t w = 0;
