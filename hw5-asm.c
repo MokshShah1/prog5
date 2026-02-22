@@ -570,14 +570,6 @@ static void addDataLabelRef(ItemList *data, uint64_t addr, const char *labelName
     pendingResolve(pending, labels, addr);
     pushItem(data, (Item){.kind = itemData, .address = addr, .text = copyText(labelName), .data = 0});
 }
-/* ✅ NEW: in .data, "\t:label" means "store address of label" */
-static void addDataLabelRef(ItemList *data, uint64_t addr, const char *labelName, PendingLabels *pending, LabelTable *labels)
-{
-    pendingResolve(pending, labels, addr);
-    pushItem(data, (Item){.kind = itemData, .address = addr, .text = copyText(labelName), .data = 0});
-}
-
-/* ---- Macro emitters (unchanged) ---- */
 
 static void emitClear(ItemList *code, uint64_t *pc, int rd, PendingLabels *pending, LabelTable *labels)
 {
