@@ -357,8 +357,8 @@ typedef struct
 {
     ItemKind kind;
     uint64_t address;
-    char *text;    // for instruction: raw text; for data: label name if label-ref, else NULL
-    uint64_t data; // for data literal
+    char *text;
+    uint64_t data;
 } Item;
 
 typedef struct
@@ -565,15 +565,6 @@ static void addDataLiteral(ItemList *data, uint64_t addr, uint64_t value, Pendin
     pushItem(data, (Item){.kind = itemData, .address = addr, .text = NULL, .data = value});
 }
 
-static void addDataLabelRef(ItemList *data, uint64_t addr, const char *labelNameNoColon,
-                            PendingLabels *pending, LabelTable *labels)
-{
-    pendingResolve(pending, labels, addr);
-    pushItem(data, (Item){.kind = itemData, .address = addr, .text = copyText(labelNameNoColon), .data = 0});
-}
-
-/* ---------- Macro emitters ---------- */
-
 static void emitClear(ItemList *code, uint64_t *pc, int rd, PendingLabels *pending, LabelTable *labels)
 {
     char line[64];
@@ -664,8 +655,6 @@ static void emitLoad64(ItemList *code, uint64_t *pc, int rd, uint64_t value, Pen
         }
     }
 }
-
-/* ---------- Encoding helpers ---------- */
 
 static uint32_t packR(uint32_t op, uint32_t rd, uint32_t rs, uint32_t rt)
 {
@@ -877,7 +866,10 @@ static uint32_t assembleInstruction(const char *instText, uint64_t pc, const Lab
                 stopBuildWithName("undefined label reference: %s", labelRef);
             }
 
-            int64_t delta = (int64_t)target - (int64_t)pc;
+            /* IMPORTANT FIX:
+               Relative branch displacement is from NEXT instruction, not current. */
+            int64_t delta = (int64_t)target - (int64_t)(pc + 4);
+
             if (delta < -2048 || delta > 2047)
             {
                 freeWords(&w);
@@ -1186,10 +1178,12 @@ static uint32_t assembleInstruction(const char *instText, uint64_t pc, const Lab
         }
     }
 
+    char *mnCopy = copyText(mn);
     freeWords(&w);
-    stopBuild("unknown instruction mnemonic");
+    stopBuildWithName("unknown instruction mnemonic: %s", mnCopy);
     return 0;
 }
+
 static void buildProgram(const char *inputPath, ItemList *code, ItemList *data, LabelTable *labels)
 {
     FILE *f = fopen(inputPath, "r");
@@ -1264,17 +1258,11 @@ static void buildProgram(const char *inputPath, ItemList *code, ItemList *data, 
 
         if (mode == sectionData)
         {
-            /* FIX: a tabbed ":label" in .data is a DATA ITEM (address-of-label), not a label definition */
-            if (*p == ':')
+            if (*p == ':' && p[1] != '\0')
             {
-                if (p[1] == '\0')
-                {
-                    fclose(f);
-                    pendingFree(&pending);
-                    stopBuild("malformed data label reference");
-                }
-                addDataLabelRef(data, dataPc, p + 1, &pending, labels);
-                dataPc += 8;
+                char *name = readLabelToken(p);
+                pendingAdd(&pending, name);
+                free(name);
                 continue;
             }
 
@@ -1286,6 +1274,7 @@ static void buildProgram(const char *inputPath, ItemList *code, ItemList *data, 
                 stopBuild("malformed data item (expected 64-bit unsigned integer)");
             }
             addDataLiteral(data, dataPc, v, &pending, labels);
+
             dataPc += 8;
             continue;
         }
@@ -1467,17 +1456,15 @@ static void buildProgram(const char *inputPath, ItemList *code, ItemList *data, 
             {
                 uint64_t addr;
                 const char *labelRef = w.items[2] + 1;
-                char *labelCopy = copyText(labelRef);
 
                 if (getLabel(labels, labelRef, &addr) == false)
                 {
                     freeWords(&w);
                     fclose(f);
                     pendingFree(&pending);
-                    stopBuildWithName("ld: undefined label: %s", labelCopy);
+                    stopBuildWithName("ld: undefined label: %s", labelRef);
                 }
 
-                free(labelCopy);
                 freeWords(&w);
                 emitLoad64(code, &codePc, rd, addr, &pending, labels);
                 continue;
