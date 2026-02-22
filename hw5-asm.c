@@ -357,8 +357,8 @@ typedef struct
 {
     ItemKind kind;
     uint64_t address;
-    char *text;
-    uint64_t data;
+    char *text;    // for instruction: full text; for data: optional label-name or ":label" reference
+    uint64_t data; // for data literal
 } Item;
 
 typedef struct
@@ -563,6 +563,13 @@ static void addDataLiteral(ItemList *data, uint64_t addr, uint64_t value, Pendin
 {
     pendingResolve(pending, labels, addr);
     pushItem(data, (Item){.kind = itemData, .address = addr, .text = NULL, .data = value});
+}
+
+static void addDataLabelRef(ItemList *data, uint64_t addr, char *labelNameOwned, PendingLabels *pending, LabelTable *labels)
+{
+    pendingResolve(pending, labels, addr);
+    // store label name (no leading ':') in text, resolve later during write
+    pushItem(data, (Item){.kind = itemData, .address = addr, .text = labelNameOwned, .data = 0});
 }
 
 static void emitClear(ItemList *code, uint64_t *pc, int rd, PendingLabels *pending, LabelTable *labels)
@@ -866,10 +873,7 @@ static uint32_t assembleInstruction(const char *instText, uint64_t pc, const Lab
                 stopBuildWithName("undefined label reference: %s", labelRef);
             }
 
-            /* IMPORTANT FIX:
-               Relative branch displacement is from NEXT instruction, not current. */
-            int64_t delta = (int64_t)target - (int64_t)(pc + 4);
-
+            int64_t delta = (int64_t)target - (int64_t)pc;
             if (delta < -2048 || delta > 2047)
             {
                 freeWords(&w);
@@ -1178,9 +1182,8 @@ static uint32_t assembleInstruction(const char *instText, uint64_t pc, const Lab
         }
     }
 
-    char *mnCopy = copyText(mn);
     freeWords(&w);
-    stopBuildWithName("unknown instruction mnemonic: %s", mnCopy);
+    stopBuild("unknown instruction mnemonic");
     return 0;
 }
 
@@ -1258,11 +1261,21 @@ static void buildProgram(const char *inputPath, ItemList *code, ItemList *data, 
 
         if (mode == sectionData)
         {
+            // support label definition inside tabbed region (same as you had)
             if (*p == ':' && p[1] != '\0')
             {
-                char *name = readLabelToken(p);
-                pendingAdd(&pending, name);
-                free(name);
+                // IMPORTANT: In .data, ":name" can mean either:
+                // 1) label definition (if line is just ":name" with no other stuff), OR
+                // 2) data value label reference (store address of label)
+                //
+                // Here, since p is the whole remainder of the line, we treat it as:
+                // - a label definition ONLY if the original line began with ':' (handled earlier)
+                // - otherwise, it's a data VALUE label ref
+                //
+                // So here: treat it as data value label reference.
+                char *refName = readLabelToken(p);
+                addDataLabelRef(data, dataPc, refName, &pending, labels);
+                dataPc += 8;
                 continue;
             }
 
@@ -1271,10 +1284,9 @@ static void buildProgram(const char *inputPath, ItemList *code, ItemList *data, 
             {
                 fclose(f);
                 pendingFree(&pending);
-                stopBuild("malformed data item (expected 64-bit unsigned integer)");
+                stopBuild("malformed data item (expected 64-bit unsigned integer or :label)");
             }
             addDataLiteral(data, dataPc, v, &pending, labels);
-
             dataPc += 8;
             continue;
         }
@@ -1551,10 +1563,11 @@ static void writeTko(const char *outPath, const ItemList *code, const ItemList *
         if (data->items[i].text != NULL)
         {
             uint64_t addr;
-            if (getLabel(labels, data->items[i].text, &addr) == false)
+            const char *name = data->items[i].text; // stored without ':'
+            if (getLabel(labels, name, &addr) == false)
             {
                 fclose(f);
-                stopBuildWithName("undefined label reference: %s", data->items[i].text);
+                stopBuildWithName("undefined label reference in data: %s", name);
             }
             writeU64LE(f, addr);
         }
