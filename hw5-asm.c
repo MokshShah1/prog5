@@ -1,4 +1,3 @@
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -688,6 +687,87 @@ static uint32_t packP(uint32_t op, uint32_t rd, uint32_t rs, uint32_t rt, uint32
     return w;
 }
 
+typedef struct
+{
+    size_t startIndex;
+    int rd;
+    char *label;
+} LdFixup;
+
+typedef struct
+{
+    LdFixup *items;
+    size_t count;
+    size_t cap;
+} LdFixupList;
+
+static void pushLdFixup(LdFixupList *l, size_t startIndex, int rd, const char *label)
+{
+    if (l->count == l->cap)
+    {
+        size_t nc = (l->cap == 0) ? 16 : l->cap * 2;
+        LdFixup *b = (LdFixup *)realloc(l->items, nc * sizeof(LdFixup));
+        if (b == NULL)
+        {
+            stopBuild("out of memory");
+        }
+        l->items = b;
+        l->cap = nc;
+    }
+    l->items[l->count].startIndex = startIndex;
+    l->items[l->count].rd = rd;
+    l->items[l->count].label = copyText(label);
+    l->count++;
+}
+
+static void freeLdFixups(LdFixupList *l)
+{
+    for (size_t i = 0; i < l->count; i++)
+    {
+        free(l->items[i].label);
+    }
+    free(l->items);
+    l->items = NULL;
+    l->count = 0;
+    l->cap = 0;
+}
+
+static void rewriteLoad64At(ItemList *code, size_t start, int rd, uint64_t value)
+{
+    const int shifts[5] = {12, 12, 12, 12, 4};
+    const int offs[5] = {40, 28, 16, 4, 0};
+
+    if (start + 12 > code->count)
+    {
+        stopBuild("internal: ld fixup out of range");
+    }
+
+#define SETLINE(i, fmt, ...)                                     \
+    do                                                           \
+    {                                                            \
+        char buf[64];                                            \
+        snprintf(buf, sizeof(buf), fmt, __VA_ARGS__);            \
+        free(code->items[(start) + (size_t)(i)].text);           \
+        code->items[(start) + (size_t)(i)].text = copyText(buf); \
+    } while (0)
+
+    SETLINE(0, "xor r%d, r%d, r%d", rd, rd, rd);
+
+    uint64_t top = (value >> 52) & 0xFFFULL;
+    SETLINE(1, "addi r%d, %llu", rd, (unsigned long long)top);
+
+    size_t k = 2;
+    for (int i = 0; i < 5; i++)
+    {
+        SETLINE((int)k++, "shftli r%d, %d", rd, shifts[i]);
+
+        uint64_t part = (i == 4) ? (value & 0xFULL) : ((value >> (uint64_t)offs[i]) & 0xFFFULL);
+        SETLINE((int)k++, "addi r%d, %llu", rd, (unsigned long long)part);
+    }
+
+#undef SETLINE
+}
+
 static uint32_t assembleInstruction(const char *instText, uint64_t pc, const LabelTable *labels)
 {
     Words w = splitLine(instText);
@@ -1200,6 +1280,9 @@ static void buildProgram(const char *inputPath, ItemList *code, ItemList *data, 
     PendingLabels pending = {.names = NULL, .count = 0, .cap = 0};
     bool sawCode = false;
 
+    /* NEW: collect ld :label fixups for forward refs */
+    LdFixupList ldFixups = {.items = NULL, .count = 0, .cap = 0};
+
     while (fgets(raw, sizeof(raw), f) != NULL)
     {
         trimEnd(raw);
@@ -1237,6 +1320,7 @@ static void buildProgram(const char *inputPath, ItemList *code, ItemList *data, 
         {
             fclose(f);
             pendingFree(&pending);
+            freeLdFixups(&ldFixups);
             stopBuild("code/data line must start with tab character");
         }
 
@@ -1244,6 +1328,7 @@ static void buildProgram(const char *inputPath, ItemList *code, ItemList *data, 
         {
             fclose(f);
             pendingFree(&pending);
+            freeLdFixups(&ldFixups);
             stopBuild("code/data line before any .code or .data directive");
         }
 
@@ -1272,6 +1357,7 @@ static void buildProgram(const char *inputPath, ItemList *code, ItemList *data, 
             {
                 fclose(f);
                 pendingFree(&pending);
+                freeLdFixups(&ldFixups);
                 stopBuild("malformed data item (expected 64-bit unsigned integer)");
             }
             addDataLiteral(data, dataPc, v, &pending, labels);
@@ -1302,6 +1388,7 @@ static void buildProgram(const char *inputPath, ItemList *code, ItemList *data, 
                 freeWords(&w);
                 fclose(f);
                 pendingFree(&pending);
+                freeLdFixups(&ldFixups);
                 stopBuild("clr expects: clr rd");
             }
 
@@ -1311,6 +1398,7 @@ static void buildProgram(const char *inputPath, ItemList *code, ItemList *data, 
                 freeWords(&w);
                 fclose(f);
                 pendingFree(&pending);
+                freeLdFixups(&ldFixups);
                 stopBuild("clr: invalid register");
             }
 
@@ -1326,6 +1414,7 @@ static void buildProgram(const char *inputPath, ItemList *code, ItemList *data, 
                 freeWords(&w);
                 fclose(f);
                 pendingFree(&pending);
+                freeLdFixups(&ldFixups);
                 stopBuild("halt expects: halt");
             }
 
@@ -1341,6 +1430,7 @@ static void buildProgram(const char *inputPath, ItemList *code, ItemList *data, 
                 freeWords(&w);
                 fclose(f);
                 pendingFree(&pending);
+                freeLdFixups(&ldFixups);
                 stopBuild("in expects: in rd, rs");
             }
 
@@ -1352,6 +1442,7 @@ static void buildProgram(const char *inputPath, ItemList *code, ItemList *data, 
                 freeWords(&w);
                 fclose(f);
                 pendingFree(&pending);
+                freeLdFixups(&ldFixups);
                 stopBuild("in: invalid register");
             }
 
@@ -1367,6 +1458,7 @@ static void buildProgram(const char *inputPath, ItemList *code, ItemList *data, 
                 freeWords(&w);
                 fclose(f);
                 pendingFree(&pending);
+                freeLdFixups(&ldFixups);
                 stopBuild("out expects: out rd, rs");
             }
 
@@ -1378,6 +1470,7 @@ static void buildProgram(const char *inputPath, ItemList *code, ItemList *data, 
                 freeWords(&w);
                 fclose(f);
                 pendingFree(&pending);
+                freeLdFixups(&ldFixups);
                 stopBuild("out: invalid register");
             }
 
@@ -1393,6 +1486,7 @@ static void buildProgram(const char *inputPath, ItemList *code, ItemList *data, 
                 freeWords(&w);
                 fclose(f);
                 pendingFree(&pending);
+                freeLdFixups(&ldFixups);
                 stopBuild("push expects: push rd");
             }
 
@@ -1402,6 +1496,7 @@ static void buildProgram(const char *inputPath, ItemList *code, ItemList *data, 
                 freeWords(&w);
                 fclose(f);
                 pendingFree(&pending);
+                freeLdFixups(&ldFixups);
                 stopBuild("push: invalid register");
             }
 
@@ -1417,6 +1512,7 @@ static void buildProgram(const char *inputPath, ItemList *code, ItemList *data, 
                 freeWords(&w);
                 fclose(f);
                 pendingFree(&pending);
+                freeLdFixups(&ldFixups);
                 stopBuild("pop expects: pop rd");
             }
 
@@ -1426,6 +1522,7 @@ static void buildProgram(const char *inputPath, ItemList *code, ItemList *data, 
                 freeWords(&w);
                 fclose(f);
                 pendingFree(&pending);
+                freeLdFixups(&ldFixups);
                 stopBuild("pop: invalid register");
             }
 
@@ -1441,6 +1538,7 @@ static void buildProgram(const char *inputPath, ItemList *code, ItemList *data, 
                 freeWords(&w);
                 fclose(f);
                 pendingFree(&pending);
+                freeLdFixups(&ldFixups);
                 stopBuild("ld expects: ld rd, valueOrLabel");
             }
 
@@ -1450,26 +1548,20 @@ static void buildProgram(const char *inputPath, ItemList *code, ItemList *data, 
                 freeWords(&w);
                 fclose(f);
                 pendingFree(&pending);
+                freeLdFixups(&ldFixups);
                 stopBuild("ld: invalid register");
             }
 
+            /* IMPORTANT CHANGE: allow forward label refs by deferring resolution */
             if (w.items[2][0] == ':' && w.items[2][1] != '\0')
             {
-                uint64_t addr;
                 const char *labelRef = w.items[2] + 1;
-                char *labelCopy = copyText(labelRef);
 
-                if (getLabel(labels, labelRef, &addr) == false)
-                {
-                    freeWords(&w);
-                    fclose(f);
-                    pendingFree(&pending);
-                    stopBuildWithName("ld: undefined label: %s", labelCopy);
-                }
+                size_t startIndex = code->count;                       /* first of the 12 emitted */
+                emitLoad64(code, &codePc, rd, 0ULL, &pending, labels); /* placeholder */
+                pushLdFixup(&ldFixups, startIndex, rd, labelRef);
 
-                free(labelCopy);
                 freeWords(&w);
-                emitLoad64(code, &codePc, rd, addr, &pending, labels);
                 continue;
             }
 
@@ -1479,6 +1571,7 @@ static void buildProgram(const char *inputPath, ItemList *code, ItemList *data, 
                 freeWords(&w);
                 fclose(f);
                 pendingFree(&pending);
+                freeLdFixups(&ldFixups);
                 stopBuild("ld: invalid literal");
             }
 
@@ -1497,6 +1590,7 @@ static void buildProgram(const char *inputPath, ItemList *code, ItemList *data, 
     if (pending.count != 0)
     {
         pendingFree(&pending);
+        freeLdFixups(&ldFixups);
         stopBuild("label at end of file without following instruction/data");
     }
 
@@ -1504,8 +1598,23 @@ static void buildProgram(const char *inputPath, ItemList *code, ItemList *data, 
 
     if (sawCode == false)
     {
+        freeLdFixups(&ldFixups);
         stopBuild("program must have at least one .code directive");
     }
+
+    /* resolve any deferred ld :label expansions now that all labels exist */
+    for (size_t i = 0; i < ldFixups.count; i++)
+    {
+        uint64_t addr = 0;
+        if (getLabel(labels, ldFixups.items[i].label, &addr) == false)
+        {
+            freeLdFixups(&ldFixups);
+            stopBuildWithName("ld: undefined label: %s", ldFixups.items[i].label);
+        }
+        rewriteLoad64At(code, ldFixups.items[i].startIndex, ldFixups.items[i].rd, addr);
+    }
+
+    freeLdFixups(&ldFixups);
 }
 
 static uint32_t *assembleAll(const ItemList *code, const LabelTable *labels)
