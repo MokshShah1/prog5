@@ -6,53 +6,57 @@
 #include <ctype.h>
 #include <errno.h>
 
-static const uint64_t codeBase = 0x2000ULL;
-static const uint64_t dataBase = 0x10000ULL;
+static const uint64_t programCodeBase = 0x2000ULL;
+static const uint64_t programDataBase = 0x10000ULL;
 
-static void stopBuild(const char *message)
+static void failBuild(const char *message)
 {
     fprintf(stderr, "Error: %s\n", message);
     exit(1);
 }
 
-static void stopBuildWithName(const char *fmt, const char *name)
+static void failBuildWithName(const char *format, const char *name)
 {
     fprintf(stderr, "Error: ");
-    fprintf(stderr, fmt, name);
+    fprintf(stderr, format, name);
     fprintf(stderr, "\n");
     exit(1);
 }
 
-static char *copyText(const char *s)
+static char *duplicateText(const char *text)
 {
-    size_t n = strlen(s);
-    char *out = (char *)malloc(n + 1);
-    if (out == NULL)
-        stopBuild("out of memory");
-    memcpy(out, s, n + 1);
-    return out;
-}
-
-static char *copyTextN(const char *s, size_t n)
-{
-    char *out = (char *)malloc(n + 1);
-    if (out == NULL)
-        stopBuild("out of memory");
-    memcpy(out, s, n);
-    out[n] = 0;
-    return out;
-}
-
-static void trimEnd(char *s)
-{
-    size_t n = strlen(s);
-    while (n > 0)
+    size_t length = strlen(text);
+    char *copy = (char *)malloc(length + 1);
+    if (copy == NULL)
     {
-        unsigned char ch = (unsigned char)s[n - 1];
+        failBuild("out of memory");
+    }
+    memcpy(copy, text, length + 1);
+    return copy;
+}
+
+static char *duplicateTextN(const char *text, size_t length)
+{
+    char *copy = (char *)malloc(length + 1);
+    if (copy == NULL)
+    {
+        failBuild("out of memory");
+    }
+    memcpy(copy, text, length);
+    copy[length] = '\0';
+    return copy;
+}
+
+static void rstripWhitespace(char *text)
+{
+    size_t length = strlen(text);
+    while (length > 0)
+    {
+        unsigned char ch = (unsigned char)text[length - 1];
         if (isspace(ch))
         {
-            s[n - 1] = 0;
-            n--;
+            text[length - 1] = '\0';
+            length--;
         }
         else
         {
@@ -61,109 +65,164 @@ static void trimEnd(char *s)
     }
 }
 
-static void cutComment(char *s)
+static void stripSemicolonComment(char *text)
 {
-    char *semi = strchr(s, ';');
-    if (semi != NULL)
-        *semi = 0;
+    char *semicolon = strchr(text, ';');
+    if (semicolon != NULL)
+    {
+        *semicolon = '\0';
+    }
 }
 
-static const char *skipBlank(const char *s)
+static const char *skipLeadingWhitespace(const char *text)
 {
-    while (*s != 0 && isspace((unsigned char)*s))
-        s++;
-    return s;
+    const char *p = text;
+    while (*p != '\0' && isspace((unsigned char)*p))
+    {
+        p++;
+    }
+    return p;
 }
 
-static bool startsWith(const char *s, const char *prefix)
+static bool hasPrefix(const char *text, const char *prefix)
 {
-    return strncmp(s, prefix, strlen(prefix)) == 0;
+    return strncmp(text, prefix, strlen(prefix)) == 0;
 }
 
-static void writeU32LE(FILE *f, uint32_t x)
+static void writeU32LittleEndian(FILE *file, uint32_t value)
 {
-    uint8_t b[4];
-    b[0] = (uint8_t)(x & 0xFFu);
-    b[1] = (uint8_t)((x >> 8) & 0xFFu);
-    b[2] = (uint8_t)((x >> 16) & 0xFFu);
-    b[3] = (uint8_t)((x >> 24) & 0xFFu);
-    if (fwrite(b, 1, 4, f) != 4)
-        stopBuild("failed writing output");
+    uint8_t bytes[4];
+    bytes[0] = (uint8_t)(value & 0xFFu);
+    bytes[1] = (uint8_t)((value >> 8) & 0xFFu);
+    bytes[2] = (uint8_t)((value >> 16) & 0xFFu);
+    bytes[3] = (uint8_t)((value >> 24) & 0xFFu);
+
+    if (fwrite(bytes, 1, 4, file) != 4)
+    {
+        failBuild("failed writing output");
+    }
 }
 
-static void writeU64LE(FILE *f, uint64_t x)
+static void writeU64LittleEndian(FILE *file, uint64_t value)
 {
-    uint8_t b[8];
-    for (int i = 0; i < 8; i++)
-        b[i] = (uint8_t)((x >> (uint64_t)(8 * i)) & 0xFFULL);
-    if (fwrite(b, 1, 8, f) != 8)
-        stopBuild("failed writing output");
+    uint8_t bytes[8];
+    int i = 0;
+
+    for (i = 0; i < 8; i++)
+    {
+        bytes[i] = (uint8_t)((value >> (uint64_t)(8 * i)) & 0xFFULL);
+    }
+
+    if (fwrite(bytes, 1, 8, file) != 8)
+    {
+        failBuild("failed writing output");
+    }
 }
 
-static int readReg(const char *token)
+static int readRegisterNumber(const char *token)
 {
     char *end = NULL;
-    long v;
+    long number = 0;
 
     if (token == NULL)
+    {
         return -1;
+    }
+
     if (!(token[0] == 'r' || token[0] == 'R'))
+    {
         return -1;
+    }
 
-    v = strtol(token + 1, &end, 10);
-    if (end == NULL || *end != 0)
+    number = strtol(token + 1, &end, 10);
+
+    if (end == NULL || *end != '\0')
+    {
         return -1;
-    if (v < 0 || v > 31)
+    }
+
+    if (number < 0 || number > 31)
+    {
         return -1;
-    return (int)v;
+    }
+
+    return (int)number;
 }
 
-static bool readU64Token(const char *token, uint64_t *out)
+static bool readUnsigned64(const char *token, uint64_t *outValue)
 {
     char *end = NULL;
-    unsigned long long v;
+    unsigned long long number = 0;
 
-    if (token == NULL || token[0] == 0)
+    if (token == NULL || token[0] == '\0')
+    {
         return false;
+    }
+
     errno = 0;
-    v = strtoull(token, &end, 0);
-    if (errno != 0)
-        return false;
-    if (end == NULL || *end != 0)
-        return false;
+    number = strtoull(token, &end, 0);
 
-    *out = (uint64_t)v;
+    if (errno != 0)
+    {
+        return false;
+    }
+
+    if (end == NULL || *end != '\0')
+    {
+        return false;
+    }
+
+    *outValue = (uint64_t)number;
     return true;
 }
 
-static bool readI12Token(const char *token, int32_t *out)
+static bool readSigned12(const char *token, int32_t *outValue)
 {
     char *end = NULL;
-    long v;
+    long number = 0;
 
-    if (token == NULL || token[0] == 0)
+    if (token == NULL || token[0] == '\0')
+    {
         return false;
+    }
+
     errno = 0;
-    v = strtol(token, &end, 0);
-    if (errno != 0)
-        return false;
-    if (end == NULL || *end != 0)
-        return false;
-    if (v < -2048 || v > 2047)
-        return false;
+    number = strtol(token, &end, 0);
 
-    *out = (int32_t)v;
+    if (errno != 0)
+    {
+        return false;
+    }
+
+    if (end == NULL || *end != '\0')
+    {
+        return false;
+    }
+
+    if (number < -2048 || number > 2047)
+    {
+        return false;
+    }
+
+    *outValue = (int32_t)number;
     return true;
 }
 
-static bool readU12Token(const char *token, uint32_t *out)
+static bool readUnsigned12(const char *token, uint32_t *outValue)
 {
-    uint64_t v = 0;
-    if (!readU64Token(token, &v))
+    uint64_t number = 0;
+
+    if (!readUnsigned64(token, &number))
+    {
         return false;
-    if (v > 0xFFFULL)
+    }
+
+    if (number > 0xFFFULL)
+    {
         return false;
-    *out = (uint32_t)v;
+    }
+
+    *outValue = (uint32_t)number;
     return true;
 }
 
@@ -171,1340 +230,1751 @@ typedef struct
 {
     char **items;
     int count;
-} Words;
+} TokenList;
 
-static void freeWords(Words w)
+static void freeTokenList(TokenList tokens)
 {
-    for (int i = 0; i < w.count; i++)
-        free(w.items[i]);
-    free(w.items);
+    int i = 0;
+
+    for (i = 0; i < tokens.count; i++)
+    {
+        free(tokens.items[i]);
+    }
+    free(tokens.items);
 }
 
-static Words splitLine(const char *line)
+static TokenList splitTokens(const char *line)
 {
-    Words w;
-    size_t cap = 8;
+    TokenList tokens;
+    size_t capacity = 8;
     const char *p = line;
 
-    w.items = (char **)malloc(sizeof(char *) * cap);
-    if (w.items == NULL)
-        stopBuild("out of memory");
-    w.count = 0;
-
-    while (*p != 0)
+    tokens.items = (char **)malloc(sizeof(char *) * capacity);
+    if (tokens.items == NULL)
     {
-        while (*p != 0 && (isspace((unsigned char)*p) || *p == ','))
-            p++;
-        if (*p == 0)
-            break;
+        failBuild("out of memory");
+    }
+    tokens.count = 0;
 
-        const char *start = p;
-        while (*p != 0 && !isspace((unsigned char)*p) && *p != ',')
-            p++;
-
-        size_t len = (size_t)(p - start);
-        char *tok = (char *)malloc(len + 1);
-        if (tok == NULL)
-            stopBuild("out of memory");
-        memcpy(tok, start, len);
-        tok[len] = 0;
-
-        if ((size_t)w.count == cap)
+    while (*p != '\0')
+    {
+        while (*p != '\0' && (isspace((unsigned char)*p) || *p == ','))
         {
-            cap *= 2;
-            char **bigger = (char **)realloc(w.items, sizeof(char *) * cap);
-            if (bigger == NULL)
-                stopBuild("out of memory");
-            w.items = bigger;
+            p++;
         }
-        w.items[w.count] = tok;
-        w.count++;
+
+        if (*p == '\0')
+        {
+            break;
+        }
+
+        {
+            const char *start = p;
+            size_t length = 0;
+            char *token = NULL;
+
+            while (*p != '\0' && !isspace((unsigned char)*p) && *p != ',')
+            {
+                p++;
+            }
+
+            length = (size_t)(p - start);
+            token = (char *)malloc(length + 1);
+            if (token == NULL)
+            {
+                failBuild("out of memory");
+            }
+
+            memcpy(token, start, length);
+            token[length] = '\0';
+
+            if ((size_t)tokens.count == capacity)
+            {
+                char **bigger = NULL;
+                capacity *= 2;
+                bigger = (char **)realloc(tokens.items, sizeof(char *) * capacity);
+                if (bigger == NULL)
+                {
+                    failBuild("out of memory");
+                }
+                tokens.items = bigger;
+            }
+
+            tokens.items[tokens.count] = token;
+            tokens.count++;
+        }
     }
 
-    return w;
+    return tokens;
 }
 
-static int countCommas(const char *s)
+static int countCharCommas(const char *text)
 {
-    int c = 0;
-    for (const char *p = s; p != NULL && *p != 0; p++)
+    int count = 0;
+    const char *p = text;
+
+    while (p != NULL && *p != '\0')
     {
         if (*p == ',')
-            c++;
+        {
+            count++;
+        }
+        p++;
     }
-    return c;
+
+    return count;
 }
 
-static int expectedCommaCount(const char *mnemonic)
+static int expectedOperandCommaCount(const char *mnemonic)
 {
     if (mnemonic == NULL)
+    {
         return -1;
+    }
 
     if (strcmp(mnemonic, "") == 0)
+    {
         return 0;
+    }
     if (strcmp(mnemonic, "halt") == 0)
+    {
         return 0;
+    }
 
     if (strcmp(mnemonic, "br") == 0)
+    {
         return 0;
+    }
     if (strcmp(mnemonic, "brr") == 0)
+    {
         return 0;
+    }
     if (strcmp(mnemonic, "call") == 0)
+    {
         return 0;
+    }
     if (strcmp(mnemonic, "return") == 0)
+    {
         return 0;
+    }
 
     if (strcmp(mnemonic, "not") == 0)
+    {
         return 1;
+    }
     if (strcmp(mnemonic, "addi") == 0)
+    {
         return 1;
+    }
     if (strcmp(mnemonic, "subi") == 0)
+    {
         return 1;
+    }
     if (strcmp(mnemonic, "shftri") == 0)
+    {
         return 1;
+    }
     if (strcmp(mnemonic, "shftli") == 0)
+    {
         return 1;
+    }
 
     if (strcmp(mnemonic, "brnz") == 0)
+    {
         return 1;
+    }
     if (strcmp(mnemonic, "mov") == 0)
+    {
         return 1;
+    }
     if (strcmp(mnemonic, "in") == 0)
+    {
         return 1;
+    }
     if (strcmp(mnemonic, "out") == 0)
+    {
         return 1;
+    }
 
     if (strcmp(mnemonic, "clr") == 0)
+    {
         return 0;
+    }
     if (strcmp(mnemonic, "push") == 0)
+    {
         return 0;
+    }
     if (strcmp(mnemonic, "pop") == 0)
+    {
         return 0;
+    }
     if (strcmp(mnemonic, "ld") == 0)
+    {
         return 1;
+    }
 
     if (strcmp(mnemonic, "priv") == 0)
+    {
         return 3;
+    }
 
     return 2;
 }
 
-static void requireCommaStyle(const char *raw, const char *mnemonic)
+static void enforceCommaStyle(const char *rawLine, const char *mnemonic)
 {
-    int want = expectedCommaCount(mnemonic);
-    if (want < 0)
+    int expected = expectedOperandCommaCount(mnemonic);
+    int actual = 0;
+
+    if (expected < 0)
+    {
         return;
-    int have = countCommas(raw);
-    if (have != want)
-        stopBuild("malformed operand separators");
+    }
+
+    actual = countCharCommas(rawLine);
+    if (actual != expected)
+    {
+        failBuild("malformed operand separators");
+    }
 }
 
 typedef enum
 {
-    sectionNone,
-    sectionCode,
-    sectionData
-} Section;
+    partNone,
+    partCode,
+    partData
+} AssemblyPart;
 
 typedef enum
 {
-    itemInstruction,
-    itemData,
-    itemLdLabel
-} ItemKind;
+    recordInstruction,
+    recordData,
+    recordLoadLabel
+} RecordType;
 
 typedef struct
 {
-    ItemKind kind;
+    RecordType type;
     uint64_t address;
-    char *text;    /* instruction text OR label name for ld-label */
-    uint64_t data; /* data literal */
-    int rd;        /* for ld-label */
-} Item;
+    char *text;
+    uint64_t data;
+    int destReg;
+} ProgramRecord;
 
 typedef struct
 {
-    Item *items;
+    ProgramRecord *items;
     size_t count;
-    size_t cap;
-} ItemList;
+    size_t capacity;
+} ProgramRecordList;
 
-static void pushItem(ItemList *list, Item it)
+static void appendRecord(ProgramRecordList *list, ProgramRecord record)
 {
-    if (list->count == list->cap)
+    if (list->count == list->capacity)
     {
-        size_t nextCap = (list->cap == 0) ? 64 : (list->cap * 2);
-        Item *bigger = (Item *)realloc(list->items, nextCap * sizeof(Item));
+        size_t newCapacity = 0;
+        ProgramRecord *bigger = NULL;
+
+        if (list->capacity == 0)
+        {
+            newCapacity = 64;
+        }
+        else
+        {
+            newCapacity = list->capacity * 2;
+        }
+
+        bigger = (ProgramRecord *)realloc(list->items, newCapacity * sizeof(ProgramRecord));
         if (bigger == NULL)
-            stopBuild("out of memory");
+        {
+            failBuild("out of memory");
+        }
+
         list->items = bigger;
-        list->cap = nextCap;
+        list->capacity = newCapacity;
     }
-    list->items[list->count] = it;
+
+    list->items[list->count] = record;
     list->count++;
 }
 
-static void freeItems(ItemList *list)
+static void freeRecordList(ProgramRecordList *list)
 {
-    for (size_t i = 0; i < list->count; i++)
+    size_t i = 0;
+
+    for (i = 0; i < list->count; i++)
+    {
         free(list->items[i].text);
+    }
+
     free(list->items);
     list->items = NULL;
     list->count = 0;
-    list->cap = 0;
+    list->capacity = 0;
 }
 
 typedef struct
 {
     char *name;
     uint64_t address;
-} Label;
+} Symbol;
 
 typedef struct
 {
-    Label *items;
+    Symbol *items;
     size_t count;
-    size_t cap;
-} LabelTable;
+    size_t capacity;
+} SymbolTable;
 
-static void addLabel(LabelTable *t, const char *name, uint64_t address)
+static void addSymbol(SymbolTable *table, const char *name, uint64_t address)
 {
-    for (size_t i = 0; i < t->count; i++)
+    size_t i = 0;
+
+    for (i = 0; i < table->count; i++)
     {
-        if (strcmp(t->items[i].name, name) == 0)
-            stopBuildWithName("duplicate label %s", name);
+        if (strcmp(table->items[i].name, name) == 0)
+        {
+            failBuildWithName("duplicate label %s", name);
+        }
     }
 
-    if (t->count == t->cap)
+    if (table->count == table->capacity)
     {
-        size_t nextCap = (t->cap == 0) ? 64 : (t->cap * 2);
-        Label *bigger = (Label *)realloc(t->items, nextCap * sizeof(Label));
+        size_t newCapacity = 0;
+        Symbol *bigger = NULL;
+
+        if (table->capacity == 0)
+        {
+            newCapacity = 64;
+        }
+        else
+        {
+            newCapacity = table->capacity * 2;
+        }
+
+        bigger = (Symbol *)realloc(table->items, newCapacity * sizeof(Symbol));
         if (bigger == NULL)
-            stopBuild("out of memory");
-        t->items = bigger;
-        t->cap = nextCap;
+        {
+            failBuild("out of memory");
+        }
+
+        table->items = bigger;
+        table->capacity = newCapacity;
     }
 
-    t->items[t->count].name = copyText(name);
-    t->items[t->count].address = address;
-    t->count++;
+    table->items[table->count].name = duplicateText(name);
+    table->items[table->count].address = address;
+    table->count++;
 }
 
-static bool getLabel(const LabelTable *t, const char *name, uint64_t *out)
+static bool findSymbol(const SymbolTable *table, const char *name, uint64_t *outAddress)
 {
-    for (size_t i = 0; i < t->count; i++)
+    size_t i = 0;
+
+    for (i = 0; i < table->count; i++)
     {
-        if (strcmp(t->items[i].name, name) == 0)
+        if (strcmp(table->items[i].name, name) == 0)
         {
-            *out = t->items[i].address;
+            *outAddress = table->items[i].address;
             return true;
         }
     }
+
     return false;
 }
 
-static void freeLabels(LabelTable *t)
+static void freeSymbolTable(SymbolTable *table)
 {
-    for (size_t i = 0; i < t->count; i++)
-        free(t->items[i].name);
-    free(t->items);
-    t->items = NULL;
-    t->count = 0;
-    t->cap = 0;
+    size_t i = 0;
+
+    for (i = 0; i < table->count; i++)
+    {
+        free(table->items[i].name);
+    }
+
+    free(table->items);
+    table->items = NULL;
+    table->count = 0;
+    table->capacity = 0;
 }
 
 typedef struct
 {
     char **names;
     size_t count;
-    size_t cap;
-} PendingLabels;
+    size_t capacity;
+} UnattachedLabels;
 
-static void pendingAdd(PendingLabels *p, const char *name)
+static void addUnattachedLabel(UnattachedLabels *pending, const char *name)
 {
-    if (p->count == p->cap)
+    if (pending->count == pending->capacity)
     {
-        size_t nextCap = (p->cap == 0) ? 32 : (p->cap * 2);
-        char **bigger = (char **)realloc(p->names, nextCap * sizeof(char *));
+        size_t newCapacity = 0;
+        char **bigger = NULL;
+
+        if (pending->capacity == 0)
+        {
+            newCapacity = 32;
+        }
+        else
+        {
+            newCapacity = pending->capacity * 2;
+        }
+
+        bigger = (char **)realloc(pending->names, newCapacity * sizeof(char *));
         if (bigger == NULL)
-            stopBuild("out of memory");
-        p->names = bigger;
-        p->cap = nextCap;
+        {
+            failBuild("out of memory");
+        }
+
+        pending->names = bigger;
+        pending->capacity = newCapacity;
     }
-    p->names[p->count] = copyText(name);
-    p->count++;
+
+    pending->names[pending->count] = duplicateText(name);
+    pending->count++;
 }
 
-static void pendingResolve(PendingLabels *p, LabelTable *t, uint64_t address)
+static void attachPendingLabels(UnattachedLabels *pending, SymbolTable *symbols, uint64_t address)
 {
-    for (size_t i = 0; i < p->count; i++)
+    size_t i = 0;
+
+    for (i = 0; i < pending->count; i++)
     {
-        addLabel(t, p->names[i], address);
-        free(p->names[i]);
+        addSymbol(symbols, pending->names[i], address);
+        free(pending->names[i]);
     }
-    p->count = 0;
+
+    pending->count = 0;
 }
 
-static void pendingFree(PendingLabels *p)
+static void freeUnattachedLabels(UnattachedLabels *pending)
 {
-    for (size_t i = 0; i < p->count; i++)
-        free(p->names[i]);
-    free(p->names);
-    p->names = NULL;
-    p->count = 0;
-    p->cap = 0;
+    size_t i = 0;
+
+    for (i = 0; i < pending->count; i++)
+    {
+        free(pending->names[i]);
+    }
+
+    free(pending->names);
+    pending->names = NULL;
+    pending->count = 0;
+    pending->capacity = 0;
 }
 
-static char *readLabelDefToken(const char *line)
+static char *readLabelDefinition(const char *line)
 {
     const char *p = line;
+    const char *start = NULL;
+
     if (p == NULL || (p[0] != '@' && p[0] != ':'))
-        stopBuild("malformed label token");
+    {
+        failBuild("malformed label token");
+    }
+
     p++;
 
-    if (*p == 0 || isspace((unsigned char)*p))
-        stopBuild("malformed label token");
-    if (!isalpha((unsigned char)*p) && *p != '_' && *p != '.')
-        stopBuild("malformed label token");
+    if (*p == '\0' || isspace((unsigned char)*p))
+    {
+        failBuild("malformed label token");
+    }
 
-    const char *start = p;
-    while (*p != 0)
+    if (!isalpha((unsigned char)*p) && *p != '_' && *p != '.')
+    {
+        failBuild("malformed label token");
+    }
+
+    start = p;
+
+    while (*p != '\0')
     {
         if (isalnum((unsigned char)*p) || *p == '_' || *p == '.')
+        {
             p++;
+        }
         else
-            stopBuild("malformed label token");
+        {
+            failBuild("malformed label token");
+        }
     }
 
-    return copyTextN(start, (size_t)(p - start));
+    return duplicateTextN(start, (size_t)(p - start));
 }
 
-static void addText(ItemList *code, uint64_t addr, const char *text, PendingLabels *pending, LabelTable *labels)
+static void addInstructionText(ProgramRecordList *code, uint64_t address, const char *text, UnattachedLabels *pending, SymbolTable *symbols)
 {
-    pendingResolve(pending, labels, addr);
-    Item it;
-    it.kind = itemInstruction;
-    it.address = addr;
-    it.text = copyText(text);
-    it.data = 0;
-    it.rd = -1;
-    pushItem(code, it);
+    ProgramRecord record;
+
+    attachPendingLabels(pending, symbols, address);
+
+    record.type = recordInstruction;
+    record.address = address;
+    record.text = duplicateText(text);
+    record.data = 0;
+    record.destReg = -1;
+
+    appendRecord(code, record);
 }
 
-static void addLdLabel(ItemList *code, uint64_t addr, int rd, const char *labelName, PendingLabels *pending, LabelTable *labels)
+static void addLoadLabelRecord(ProgramRecordList *code, uint64_t address, int destReg, const char *labelName, UnattachedLabels *pending, SymbolTable *symbols)
 {
-    pendingResolve(pending, labels, addr);
-    Item it;
-    it.kind = itemLdLabel;
-    it.address = addr;
-    it.text = copyText(labelName);
-    it.data = 0;
-    it.rd = rd;
-    pushItem(code, it);
+    ProgramRecord record;
+
+    attachPendingLabels(pending, symbols, address);
+
+    record.type = recordLoadLabel;
+    record.address = address;
+    record.text = duplicateText(labelName);
+    record.data = 0;
+    record.destReg = destReg;
+
+    appendRecord(code, record);
 }
 
-static void addDataLiteral(ItemList *data, uint64_t addr, uint64_t value, PendingLabels *pending, LabelTable *labels)
+static void addDataValue(ProgramRecordList *data, uint64_t address, uint64_t value, UnattachedLabels *pending, SymbolTable *symbols)
 {
-    pendingResolve(pending, labels, addr);
-    Item it;
-    it.kind = itemData;
-    it.address = addr;
-    it.text = NULL;
-    it.data = value;
-    it.rd = -1;
-    pushItem(data, it);
+    ProgramRecord record;
+
+    attachPendingLabels(pending, symbols, address);
+
+    record.type = recordData;
+    record.address = address;
+    record.text = NULL;
+    record.data = value;
+    record.destReg = -1;
+
+    appendRecord(data, record);
 }
 
-static void addDataLabelRef(ItemList *data, uint64_t addr, const char *labelName, PendingLabels *pending, LabelTable *labels)
+static void addDataLabelReference(ProgramRecordList *data, uint64_t address, const char *labelName, UnattachedLabels *pending, SymbolTable *symbols)
 {
-    pendingResolve(pending, labels, addr);
-    Item it;
-    it.kind = itemData;
-    it.address = addr;
-    it.text = copyText(labelName);
-    it.data = 0;
-    it.rd = -1;
-    pushItem(data, it);
+    ProgramRecord record;
+
+    attachPendingLabels(pending, symbols, address);
+
+    record.type = recordData;
+    record.address = address;
+    record.text = duplicateText(labelName);
+    record.data = 0;
+    record.destReg = -1;
+
+    appendRecord(data, record);
 }
 
-/* Macros */
-static void emitClear(ItemList *code, uint64_t *pc, int rd, PendingLabels *pending, LabelTable *labels)
-{
-    char line[64];
-    snprintf(line, sizeof(line), "xor r%d, r%d, r%d", rd, rd, rd);
-    addText(code, *pc, line, pending, labels);
-    *pc += 4;
-}
-
-static void emitHalt(ItemList *code, uint64_t *pc, PendingLabels *pending, LabelTable *labels)
-{
-    addText(code, *pc, "priv r0, r0, r0, 0", pending, labels);
-    *pc += 4;
-}
-
-static void emitIn(ItemList *code, uint64_t *pc, int rd, int rs, PendingLabels *pending, LabelTable *labels)
+static void emitClearRegister(ProgramRecordList *code, uint64_t *pc, int destReg, UnattachedLabels *pending, SymbolTable *symbols)
 {
     char line[64];
-    snprintf(line, sizeof(line), "priv r%d, r%d, r0, 3", rd, rs);
-    addText(code, *pc, line, pending, labels);
+
+    snprintf(line, sizeof(line), "xor r%d, r%d, r%d", destReg, destReg, destReg);
+    addInstructionText(code, *pc, line, pending, symbols);
     *pc += 4;
 }
 
-static void emitOut(ItemList *code, uint64_t *pc, int rd, int rs, PendingLabels *pending, LabelTable *labels)
+static void emitHaltInstruction(ProgramRecordList *code, uint64_t *pc, UnattachedLabels *pending, SymbolTable *symbols)
+{
+    addInstructionText(code, *pc, "priv r0, r0, r0, 0", pending, symbols);
+    *pc += 4;
+}
+
+static void emitInputInstruction(ProgramRecordList *code, uint64_t *pc, int destReg, int srcReg, UnattachedLabels *pending, SymbolTable *symbols)
 {
     char line[64];
-    snprintf(line, sizeof(line), "priv r%d, r%d, r0, 4", rd, rs);
-    addText(code, *pc, line, pending, labels);
+
+    snprintf(line, sizeof(line), "priv r%d, r%d, r0, 3", destReg, srcReg);
+    addInstructionText(code, *pc, line, pending, symbols);
     *pc += 4;
 }
 
-/* IMPORTANT: keep the exact push/pop expansion that the autograder expects */
-static void emitPush(ItemList *code, uint64_t *pc, int rd, PendingLabels *pending, LabelTable *labels)
+static void emitOutputInstruction(ProgramRecordList *code, uint64_t *pc, int destReg, int srcReg, UnattachedLabels *pending, SymbolTable *symbols)
 {
-    /* store at (sp)(-8) then sp -= 8 */
-    char a[64];
-    snprintf(a, sizeof(a), "mov (r31)(-8), r%d", rd);
-    addText(code, *pc, a, pending, labels);
-    *pc += 4;
-    addText(code, *pc, "subi r31, 8", pending, labels);
-    *pc += 4;
-}
-
-static void emitPop(ItemList *code, uint64_t *pc, int rd, PendingLabels *pending, LabelTable *labels)
-{
-    /* load from (sp)(0) then sp += 8 */
-    char a[64];
-    snprintf(a, sizeof(a), "mov r%d, (r31)(0)", rd);
-    addText(code, *pc, a, pending, labels);
-    *pc += 4;
-    addText(code, *pc, "addi r31, 8", pending, labels);
-    *pc += 4;
-}
-
-/* emitLoad64 expands to 12 instructions => 48 bytes */
-static void emitLoad64(ItemList *code, uint64_t *pc, int rd, uint64_t value, PendingLabels *pending, LabelTable *labels)
-{
-    const int shifts[5] = {12, 12, 12, 12, 4};
-    const int offs[5] = {40, 28, 16, 4, 0};
-
     char line[64];
-    snprintf(line, sizeof(line), "xor r%d, r%d, r%d", rd, rd, rd);
-    addText(code, *pc, line, pending, labels);
+
+    snprintf(line, sizeof(line), "priv r%d, r%d, r0, 4", destReg, srcReg);
+    addInstructionText(code, *pc, line, pending, symbols);
+    *pc += 4;
+}
+
+static void emitPushRegister(ProgramRecordList *code, uint64_t *pc, int srcReg, UnattachedLabels *pending, SymbolTable *symbols)
+{
+    char line[64];
+
+    snprintf(line, sizeof(line), "mov (r31)(-8), r%d", srcReg);
+    addInstructionText(code, *pc, line, pending, symbols);
     *pc += 4;
 
-    uint64_t top = (value >> 52) & 0xFFFULL;
-    snprintf(line, sizeof(line), "addi r%d, %llu", rd, (unsigned long long)top);
-    addText(code, *pc, line, pending, labels);
+    addInstructionText(code, *pc, "subi r31, 8", pending, symbols);
+    *pc += 4;
+}
+
+static void emitPopRegister(ProgramRecordList *code, uint64_t *pc, int destReg, UnattachedLabels *pending, SymbolTable *symbols)
+{
+    char line[64];
+
+    snprintf(line, sizeof(line), "mov r%d, (r31)(0)", destReg);
+    addInstructionText(code, *pc, line, pending, symbols);
     *pc += 4;
 
-    for (int i = 0; i < 5; i++)
+    addInstructionText(code, *pc, "addi r31, 8", pending, symbols);
+    *pc += 4;
+}
+
+static void emitLoadImmediate64(ProgramRecordList *code, uint64_t *pc, int destReg, uint64_t value, UnattachedLabels *pending, SymbolTable *symbols)
+{
+    const int shiftAmounts[5] = {12, 12, 12, 12, 4};
+    const int offsets[5] = {40, 28, 16, 4, 0};
+    char line[64];
+    uint64_t top = 0;
+    int i = 0;
+
+    snprintf(line, sizeof(line), "xor r%d, r%d, r%d", destReg, destReg, destReg);
+    addInstructionText(code, *pc, line, pending, symbols);
+    *pc += 4;
+
+    top = (value >> 52) & 0xFFFULL;
+    snprintf(line, sizeof(line), "addi r%d, %llu", destReg, (unsigned long long)top);
+    addInstructionText(code, *pc, line, pending, symbols);
+    *pc += 4;
+
+    for (i = 0; i < 5; i++)
     {
-        snprintf(line, sizeof(line), "shftli r%d, %d", rd, shifts[i]);
-        addText(code, *pc, line, pending, labels);
+        uint64_t part = 0;
+
+        snprintf(line, sizeof(line), "shftli r%d, %d", destReg, shiftAmounts[i]);
+        addInstructionText(code, *pc, line, pending, symbols);
         *pc += 4;
 
-        uint64_t part = (i == 4) ? (value & 0xFULL) : ((value >> (uint64_t)offs[i]) & 0xFFFULL);
-        snprintf(line, sizeof(line), "addi r%d, %llu", rd, (unsigned long long)part);
-        addText(code, *pc, line, pending, labels);
+        if (i == 4)
+        {
+            part = value & 0xFULL;
+        }
+        else
+        {
+            part = (value >> (uint64_t)offsets[i]) & 0xFFFULL;
+        }
+
+        snprintf(line, sizeof(line), "addi r%d, %llu", destReg, (unsigned long long)part);
+        addInstructionText(code, *pc, line, pending, symbols);
         *pc += 4;
     }
 }
 
-static uint32_t packR(uint32_t op, uint32_t rd, uint32_t rs, uint32_t rt)
+static uint32_t encodeRType(uint32_t opcode, uint32_t rd, uint32_t rs, uint32_t rt)
 {
-    uint32_t w = 0;
-    w |= (op & 0x1Fu) << 27;
-    w |= (rd & 0x1Fu) << 22;
-    w |= (rs & 0x1Fu) << 17;
-    w |= (rt & 0x1Fu) << 12;
-    return w;
+    uint32_t word = 0;
+
+    word |= (opcode & 0x1Fu) << 27;
+    word |= (rd & 0x1Fu) << 22;
+    word |= (rs & 0x1Fu) << 17;
+    word |= (rt & 0x1Fu) << 12;
+
+    return word;
 }
 
-static uint32_t packI(uint32_t op, uint32_t rd, uint32_t rs, uint32_t imm12)
+static uint32_t encodeIType(uint32_t opcode, uint32_t rd, uint32_t rs, uint32_t imm12)
 {
-    uint32_t w = 0;
-    w |= (op & 0x1Fu) << 27;
-    w |= (rd & 0x1Fu) << 22;
-    w |= (rs & 0x1Fu) << 17;
-    w |= (imm12 & 0xFFFu);
-    return w;
+    uint32_t word = 0;
+
+    word |= (opcode & 0x1Fu) << 27;
+    word |= (rd & 0x1Fu) << 22;
+    word |= (rs & 0x1Fu) << 17;
+    word |= (imm12 & 0xFFFu);
+
+    return word;
 }
 
-static uint32_t packP(uint32_t op, uint32_t rd, uint32_t rs, uint32_t rt, uint32_t imm12)
+static uint32_t encodePType(uint32_t opcode, uint32_t rd, uint32_t rs, uint32_t rt, uint32_t imm12)
 {
-    uint32_t w = 0;
-    w |= (op & 0x1Fu) << 27;
-    w |= (rd & 0x1Fu) << 22;
-    w |= (rs & 0x1Fu) << 17;
-    w |= (rt & 0x1Fu) << 12;
-    w |= (imm12 & 0xFFFu);
-    return w;
+    uint32_t word = 0;
+
+    word |= (opcode & 0x1Fu) << 27;
+    word |= (rd & 0x1Fu) << 22;
+    word |= (rs & 0x1Fu) << 17;
+    word |= (rt & 0x1Fu) << 12;
+    word |= (imm12 & 0xFFFu);
+
+    return word;
 }
 
-/* parse "(rX)(imm)" into base reg and signed imm12 */
-static bool parseMemOperandParen(const char *tok, int *outBase, int32_t *outImm)
+static bool readMemoryOperandParen(const char *token, int *outBaseReg, int32_t *outSignedImm)
 {
-    if (tok == NULL || tok[0] != '(')
+    const char *p = NULL;
+    const char *close1 = NULL;
+    const char *close2 = NULL;
+    size_t len1 = 0;
+    size_t len2 = 0;
+    char regText[40];
+    char immText[80];
+    int baseReg = -1;
+    int32_t signedImm = 0;
+
+    if (token == NULL || token[0] != '(')
+    {
         return false;
+    }
 
-    const char *p = tok + 1;
-    const char *close1 = strchr(p, ')');
+    p = token + 1;
+    close1 = strchr(p, ')');
     if (close1 == NULL)
+    {
         return false;
+    }
 
-    size_t len1 = (size_t)(close1 - p);
+    len1 = (size_t)(close1 - p);
     if (len1 == 0 || len1 >= 32)
+    {
         return false;
+    }
 
-    char regTok[40];
-    memcpy(regTok, p, len1);
-    regTok[len1] = 0;
+    memcpy(regText, p, len1);
+    regText[len1] = '\0';
 
     p = close1 + 1;
     if (*p != '(')
+    {
         return false;
+    }
     p++;
 
-    const char *close2 = strchr(p, ')');
+    close2 = strchr(p, ')');
     if (close2 == NULL)
+    {
         return false;
+    }
 
-    size_t len2 = (size_t)(close2 - p);
+    len2 = (size_t)(close2 - p);
     if (len2 == 0 || len2 >= 64)
+    {
         return false;
+    }
 
-    char immTok[80];
-    memcpy(immTok, p, len2);
-    immTok[len2] = 0;
+    memcpy(immText, p, len2);
+    immText[len2] = '\0';
 
-    if (close2[1] != 0)
+    if (close2[1] != '\0')
+    {
         return false;
+    }
 
-    int base = readReg(regTok);
-    if (base < 0)
+    baseReg = readRegisterNumber(regText);
+    if (baseReg < 0)
+    {
         return false;
+    }
 
-    int32_t immS = 0;
-    if (!readI12Token(immTok, &immS))
+    if (!readSigned12(immText, &signedImm))
+    {
         return false;
+    }
 
-    *outBase = base;
-    *outImm = immS;
+    *outBaseReg = baseReg;
+    *outSignedImm = signedImm;
     return true;
 }
 
-/* Supports brr with:
-   - register: brr rX
-   - signed imm: brr -12
-   - label: brr :Label or brr @Label   (offset = target - pc) */
-static uint32_t assembleInstruction(const char *instText, uint64_t pc, const LabelTable *labels)
+static uint32_t assembleOneInstruction(const char *instructionText, uint64_t pc, const SymbolTable *symbols)
 {
-    Words w = splitLine(instText);
-    if (w.count == 0)
+    TokenList tokens;
+    const char *mnemonic = NULL;
+
+    tokens = splitTokens(instructionText);
+
+    if (tokens.count == 0)
     {
-        freeWords(w);
-        stopBuild("empty instruction");
+        freeTokenList(tokens);
+        failBuild("empty instruction");
     }
 
-    for (char *c = w.items[0]; *c != 0; c++)
-        *c = (char)tolower((unsigned char)*c);
-    const char *mn = w.items[0];
-
-    /* R-type */
-    if (strcmp(mn, "and") == 0 || strcmp(mn, "or") == 0 || strcmp(mn, "xor") == 0 ||
-        strcmp(mn, "add") == 0 || strcmp(mn, "sub") == 0 || strcmp(mn, "mul") == 0 || strcmp(mn, "div") == 0 ||
-        strcmp(mn, "addf") == 0 || strcmp(mn, "subf") == 0 || strcmp(mn, "mulf") == 0 || strcmp(mn, "divf") == 0 ||
-        strcmp(mn, "shftr") == 0 || strcmp(mn, "shftl") == 0)
     {
-        if (w.count != 4)
+        char *c = tokens.items[0];
+        while (*c != '\0')
         {
-            freeWords(w);
-            stopBuild("R-type expects 3 registers");
+            *c = (char)tolower((unsigned char)*c);
+            c++;
         }
-        int rd = readReg(w.items[1]);
-        int rs = readReg(w.items[2]);
-        int rt = readReg(w.items[3]);
+    }
+
+    mnemonic = tokens.items[0];
+
+    if (strcmp(mnemonic, "and") == 0 || strcmp(mnemonic, "or") == 0 || strcmp(mnemonic, "xor") == 0 ||
+        strcmp(mnemonic, "add") == 0 || strcmp(mnemonic, "sub") == 0 || strcmp(mnemonic, "mul") == 0 || strcmp(mnemonic, "div") == 0 ||
+        strcmp(mnemonic, "addf") == 0 || strcmp(mnemonic, "subf") == 0 || strcmp(mnemonic, "mulf") == 0 || strcmp(mnemonic, "divf") == 0 ||
+        strcmp(mnemonic, "shftr") == 0 || strcmp(mnemonic, "shftl") == 0)
+    {
+        int rd = -1;
+        int rs = -1;
+        int rt = -1;
+        uint32_t opcode = 0;
+
+        if (tokens.count != 4)
+        {
+            freeTokenList(tokens);
+            failBuild("R-type expects 3 registers");
+        }
+
+        rd = readRegisterNumber(tokens.items[1]);
+        rs = readRegisterNumber(tokens.items[2]);
+        rt = readRegisterNumber(tokens.items[3]);
+
         if (rd < 0 || rs < 0 || rt < 0)
         {
-            freeWords(w);
-            stopBuild("invalid register");
+            freeTokenList(tokens);
+            failBuild("invalid register");
         }
 
-        uint32_t op = 0;
-        if (strcmp(mn, "and") == 0)
-            op = 0x00;
-        else if (strcmp(mn, "or") == 0)
-            op = 0x01;
-        else if (strcmp(mn, "xor") == 0)
-            op = 0x02;
-        else if (strcmp(mn, "shftr") == 0)
-            op = 0x04;
-        else if (strcmp(mn, "shftl") == 0)
-            op = 0x06;
-        else if (strcmp(mn, "addf") == 0)
-            op = 0x14;
-        else if (strcmp(mn, "subf") == 0)
-            op = 0x15;
-        else if (strcmp(mn, "mulf") == 0)
-            op = 0x16;
-        else if (strcmp(mn, "divf") == 0)
-            op = 0x17;
-        else if (strcmp(mn, "add") == 0)
-            op = 0x18;
-        else if (strcmp(mn, "sub") == 0)
-            op = 0x1A;
-        else if (strcmp(mn, "mul") == 0)
-            op = 0x1C;
-        else if (strcmp(mn, "div") == 0)
-            op = 0x1D;
+        if (strcmp(mnemonic, "and") == 0)
+        {
+            opcode = 0x00;
+        }
+        else if (strcmp(mnemonic, "or") == 0)
+        {
+            opcode = 0x01;
+        }
+        else if (strcmp(mnemonic, "xor") == 0)
+        {
+            opcode = 0x02;
+        }
+        else if (strcmp(mnemonic, "shftr") == 0)
+        {
+            opcode = 0x04;
+        }
+        else if (strcmp(mnemonic, "shftl") == 0)
+        {
+            opcode = 0x06;
+        }
+        else if (strcmp(mnemonic, "addf") == 0)
+        {
+            opcode = 0x14;
+        }
+        else if (strcmp(mnemonic, "subf") == 0)
+        {
+            opcode = 0x15;
+        }
+        else if (strcmp(mnemonic, "mulf") == 0)
+        {
+            opcode = 0x16;
+        }
+        else if (strcmp(mnemonic, "divf") == 0)
+        {
+            opcode = 0x17;
+        }
+        else if (strcmp(mnemonic, "add") == 0)
+        {
+            opcode = 0x18;
+        }
+        else if (strcmp(mnemonic, "sub") == 0)
+        {
+            opcode = 0x1A;
+        }
+        else if (strcmp(mnemonic, "mul") == 0)
+        {
+            opcode = 0x1C;
+        }
+        else if (strcmp(mnemonic, "div") == 0)
+        {
+            opcode = 0x1D;
+        }
         else
         {
-            freeWords(w);
-            stopBuild("unknown instruction");
+            freeTokenList(tokens);
+            failBuild("unknown instruction");
         }
 
-        freeWords(w);
-        return packR(op, (uint32_t)rd, (uint32_t)rs, (uint32_t)rt);
+        freeTokenList(tokens);
+        return encodeRType(opcode, (uint32_t)rd, (uint32_t)rs, (uint32_t)rt);
     }
 
-    if (strcmp(mn, "not") == 0)
+    if (strcmp(mnemonic, "not") == 0)
     {
-        if (w.count != 3)
+        int rd = -1;
+        int rs = -1;
+
+        if (tokens.count != 3)
         {
-            freeWords(w);
-            stopBuild("not expects 2 registers");
+            freeTokenList(tokens);
+            failBuild("not expects 2 registers");
         }
-        int rd = readReg(w.items[1]);
-        int rs = readReg(w.items[2]);
+
+        rd = readRegisterNumber(tokens.items[1]);
+        rs = readRegisterNumber(tokens.items[2]);
+
         if (rd < 0 || rs < 0)
         {
-            freeWords(w);
-            stopBuild("invalid register");
+            freeTokenList(tokens);
+            failBuild("invalid register");
         }
-        freeWords(w);
-        return packR(0x03, (uint32_t)rd, (uint32_t)rs, 0);
+
+        freeTokenList(tokens);
+        return encodeRType(0x03, (uint32_t)rd, (uint32_t)rs, 0);
     }
 
-    if (strcmp(mn, "addi") == 0 || strcmp(mn, "subi") == 0 || strcmp(mn, "shftri") == 0 || strcmp(mn, "shftli") == 0)
+    if (strcmp(mnemonic, "addi") == 0 || strcmp(mnemonic, "subi") == 0 || strcmp(mnemonic, "shftri") == 0 || strcmp(mnemonic, "shftli") == 0)
     {
-        if (w.count != 3)
-        {
-            freeWords(w);
-            stopBuild("I-type expects rd, imm");
-        }
-        int rd = readReg(w.items[1]);
-        if (rd < 0)
-        {
-            freeWords(w);
-            stopBuild("invalid register");
-        }
+        int rd = -1;
         uint32_t imm = 0;
-        if (!readU12Token(w.items[2], &imm))
+        uint32_t opcode = 0;
+
+        if (tokens.count != 3)
         {
-            freeWords(w);
-            stopBuild("immediate must be 0..4095");
+            freeTokenList(tokens);
+            failBuild("I-type expects rd, imm");
         }
 
-        uint32_t op = 0;
-        if (strcmp(mn, "addi") == 0)
-            op = 0x19;
-        else if (strcmp(mn, "subi") == 0)
-            op = 0x1B;
-        else if (strcmp(mn, "shftri") == 0)
-            op = 0x05;
-        else
-            op = 0x07;
-
-        freeWords(w);
-        return packI(op, (uint32_t)rd, 0, imm);
-    }
-
-    if (strcmp(mn, "br") == 0)
-    {
-        if (w.count != 2)
-        {
-            freeWords(w);
-            stopBuild("br expects rd");
-        }
-        int rd = readReg(w.items[1]);
+        rd = readRegisterNumber(tokens.items[1]);
         if (rd < 0)
         {
-            freeWords(w);
-            stopBuild("invalid register");
+            freeTokenList(tokens);
+            failBuild("invalid register");
         }
-        freeWords(w);
-        return packR(0x08, (uint32_t)rd, 0, 0);
+
+        if (!readUnsigned12(tokens.items[2], &imm))
+        {
+            freeTokenList(tokens);
+            failBuild("immediate must be 0..4095");
+        }
+
+        if (strcmp(mnemonic, "addi") == 0)
+        {
+            opcode = 0x19;
+        }
+        else if (strcmp(mnemonic, "subi") == 0)
+        {
+            opcode = 0x1B;
+        }
+        else if (strcmp(mnemonic, "shftri") == 0)
+        {
+            opcode = 0x05;
+        }
+        else
+        {
+            opcode = 0x07;
+        }
+
+        freeTokenList(tokens);
+        return encodeIType(opcode, (uint32_t)rd, 0, imm);
     }
 
-    if (strcmp(mn, "brr") == 0)
+    if (strcmp(mnemonic, "br") == 0)
     {
-        if (w.count != 2)
+        int rd = -1;
+
+        if (tokens.count != 2)
         {
-            freeWords(w);
-            stopBuild("brr expects rd or imm/label");
+            freeTokenList(tokens);
+            failBuild("br expects rd");
         }
 
-        int r = readReg(w.items[1]);
-        if (r >= 0)
+        rd = readRegisterNumber(tokens.items[1]);
+        if (rd < 0)
         {
-            freeWords(w);
-            return packR(0x09, (uint32_t)r, 0, 0);
+            freeTokenList(tokens);
+            failBuild("invalid register");
         }
 
-        if (w.items[1][0] == ':' || w.items[1][0] == '@')
+        freeTokenList(tokens);
+        return encodeRType(0x08, (uint32_t)rd, 0, 0);
+    }
+
+    if (strcmp(mnemonic, "brr") == 0)
+    {
+        if (tokens.count != 2)
+        {
+            freeTokenList(tokens);
+            failBuild("brr expects rd or imm/label");
+        }
+
+        {
+            int reg = readRegisterNumber(tokens.items[1]);
+            if (reg >= 0)
+            {
+                freeTokenList(tokens);
+                return encodeRType(0x09, (uint32_t)reg, 0, 0);
+            }
+        }
+
+        if (tokens.items[1][0] == ':' || tokens.items[1][0] == '@')
         {
             uint64_t target = 0;
-            const char *name = w.items[1] + 1;
-            if (!getLabel(labels, name, &target))
+            const char *name = tokens.items[1] + 1;
+            int64_t delta = 0;
+            uint32_t imm12 = 0;
+
+            if (!findSymbol(symbols, name, &target))
             {
-                freeWords(w);
-                stopBuildWithName("undefined label reference %s", w.items[1]);
+                freeTokenList(tokens);
+                failBuildWithName("undefined label reference %s", tokens.items[1]);
             }
 
-            int64_t delta = (int64_t)target - (int64_t)pc;
+            delta = (int64_t)target - (int64_t)pc;
+
             if (delta < -2048LL || delta > 2047LL)
             {
-                freeWords(w);
-                stopBuild("brr label out of range for signed 12-bit");
+                freeTokenList(tokens);
+                failBuild("brr label out of range for signed 12-bit");
             }
-            uint32_t imm12 = (uint32_t)((int32_t)delta) & 0xFFFu;
-            freeWords(w);
+
+            imm12 = (uint32_t)((int32_t)delta) & 0xFFFu;
+            freeTokenList(tokens);
             return ((0x0Au & 0x1Fu) << 27) | imm12;
         }
 
-        int32_t rel = 0;
-        if (!readI12Token(w.items[1], &rel))
         {
-            freeWords(w);
-            stopBuild("brr immediate must fit signed 12-bit");
+            int32_t rel = 0;
+            uint32_t imm12 = 0;
+
+            if (!readSigned12(tokens.items[1], &rel))
+            {
+                freeTokenList(tokens);
+                failBuild("brr immediate must fit signed 12-bit");
+            }
+
+            imm12 = (uint32_t)rel & 0xFFFu;
+            freeTokenList(tokens);
+            return ((0x0Au & 0x1Fu) << 27) | imm12;
         }
-        uint32_t imm12 = (uint32_t)rel & 0xFFFu;
-        freeWords(w);
-        return ((0x0Au & 0x1Fu) << 27) | imm12;
     }
 
-    if (strcmp(mn, "brnz") == 0)
+    if (strcmp(mnemonic, "brnz") == 0)
     {
-        if (w.count != 3)
+        int rd = -1;
+        int rs = -1;
+
+        if (tokens.count != 3)
         {
-            freeWords(w);
-            stopBuild("brnz expects rd, rs");
+            freeTokenList(tokens);
+            failBuild("brnz expects rd, rs");
         }
-        int rd = readReg(w.items[1]);
-        int rs = readReg(w.items[2]);
+
+        rd = readRegisterNumber(tokens.items[1]);
+        rs = readRegisterNumber(tokens.items[2]);
+
         if (rd < 0 || rs < 0)
         {
-            freeWords(w);
-            stopBuild("invalid register");
+            freeTokenList(tokens);
+            failBuild("invalid register");
         }
-        freeWords(w);
-        return packR(0x0B, (uint32_t)rd, (uint32_t)rs, 0);
+
+        freeTokenList(tokens);
+        return encodeRType(0x0B, (uint32_t)rd, (uint32_t)rs, 0);
     }
 
-    if (strcmp(mn, "call") == 0)
+    if (strcmp(mnemonic, "call") == 0)
     {
-        if (w.count != 2)
+        int rd = -1;
+
+        if (tokens.count != 2)
         {
-            freeWords(w);
-            stopBuild("call expects rd");
+            freeTokenList(tokens);
+            failBuild("call expects rd");
         }
-        int rd = readReg(w.items[1]);
+
+        rd = readRegisterNumber(tokens.items[1]);
         if (rd < 0)
         {
-            freeWords(w);
-            stopBuild("invalid register");
+            freeTokenList(tokens);
+            failBuild("invalid register");
         }
-        freeWords(w);
-        return packR(0x0C, (uint32_t)rd, 0, 0);
+
+        freeTokenList(tokens);
+        return encodeRType(0x0C, (uint32_t)rd, 0, 0);
     }
 
-    if (strcmp(mn, "return") == 0)
+    if (strcmp(mnemonic, "return") == 0)
     {
-        if (w.count != 1)
+        if (tokens.count != 1)
         {
-            freeWords(w);
-            stopBuild("return expects no operands");
+            freeTokenList(tokens);
+            failBuild("return expects no operands");
         }
-        freeWords(w);
+
+        freeTokenList(tokens);
         return (0x0Du & 0x1Fu) << 27;
     }
 
-    if (strcmp(mn, "brgt") == 0)
+    if (strcmp(mnemonic, "brgt") == 0)
     {
-        if (w.count != 4)
+        int rd = -1;
+        int rs = -1;
+        int rt = -1;
+
+        if (tokens.count != 4)
         {
-            freeWords(w);
-            stopBuild("brgt expects rd, rs, rt");
+            freeTokenList(tokens);
+            failBuild("brgt expects rd, rs, rt");
         }
-        int rd = readReg(w.items[1]);
-        int rs = readReg(w.items[2]);
-        int rt = readReg(w.items[3]);
+
+        rd = readRegisterNumber(tokens.items[1]);
+        rs = readRegisterNumber(tokens.items[2]);
+        rt = readRegisterNumber(tokens.items[3]);
+
         if (rd < 0 || rs < 0 || rt < 0)
         {
-            freeWords(w);
-            stopBuild("invalid register");
+            freeTokenList(tokens);
+            failBuild("invalid register");
         }
-        freeWords(w);
-        return packR(0x0E, (uint32_t)rd, (uint32_t)rs, (uint32_t)rt);
+
+        freeTokenList(tokens);
+        return encodeRType(0x0E, (uint32_t)rd, (uint32_t)rs, (uint32_t)rt);
     }
 
-    if (strcmp(mn, "priv") == 0)
+    if (strcmp(mnemonic, "priv") == 0)
     {
-        if (w.count != 5)
-        {
-            freeWords(w);
-            stopBuild("priv expects rd, rs, rt, imm");
-        }
-        int rd = readReg(w.items[1]);
-        int rs = readReg(w.items[2]);
-        int rt = readReg(w.items[3]);
-        if (rd < 0 || rs < 0 || rt < 0)
-        {
-            freeWords(w);
-            stopBuild("invalid register");
-        }
+        int rd = -1;
+        int rs = -1;
+        int rt = -1;
         uint32_t imm = 0;
-        if (!readU12Token(w.items[4], &imm))
+
+        if (tokens.count != 5)
         {
-            freeWords(w);
-            stopBuild("priv imm must be 0..4095");
+            freeTokenList(tokens);
+            failBuild("priv expects rd, rs, rt, imm");
         }
-        freeWords(w);
-        return packP(0x0F, (uint32_t)rd, (uint32_t)rs, (uint32_t)rt, imm);
+
+        rd = readRegisterNumber(tokens.items[1]);
+        rs = readRegisterNumber(tokens.items[2]);
+        rt = readRegisterNumber(tokens.items[3]);
+
+        if (rd < 0 || rs < 0 || rt < 0)
+        {
+            freeTokenList(tokens);
+            failBuild("invalid register");
+        }
+
+        if (!readUnsigned12(tokens.items[4], &imm))
+        {
+            freeTokenList(tokens);
+            failBuild("priv imm must be 0..4095");
+        }
+
+        freeTokenList(tokens);
+        return encodePType(0x0F, (uint32_t)rd, (uint32_t)rs, (uint32_t)rt, imm);
     }
 
-    if (strcmp(mn, "mov") == 0)
+    if (strcmp(mnemonic, "mov") == 0)
     {
-        if (w.count != 3)
-        {
-            freeWords(w);
-            stopBuild("mov expects 2 operands");
-        }
-        const char *left = w.items[1];
-        const char *right = w.items[2];
+        const char *left = NULL;
+        const char *right = NULL;
 
-        /* Disallow legacy rX+imm / rX-imm memory forms */
+        if (tokens.count != 3)
+        {
+            freeTokenList(tokens);
+            failBuild("mov expects 2 operands");
+        }
+
+        left = tokens.items[1];
+        right = tokens.items[2];
+
         if ((left[0] == 'r' || left[0] == 'R') && (strchr(left, '+') != NULL || strchr(left, '-') != NULL))
         {
-            freeWords(w);
-            stopBuild("mov malformed memory operand");
-        }
-        if ((right[0] == 'r' || right[0] == 'R') && (strchr(right, '+') != NULL || strchr(right, '-') != NULL))
-        {
-            freeWords(w);
-            stopBuild("mov malformed memory operand");
+            freeTokenList(tokens);
+            failBuild("mov malformed memory operand");
         }
 
-        /* Store: mov (rBASE)(imm), rSRC */
+        if ((right[0] == 'r' || right[0] == 'R') && (strchr(right, '+') != NULL || strchr(right, '-') != NULL))
+        {
+            freeTokenList(tokens);
+            failBuild("mov malformed memory operand");
+        }
+
         if (left[0] == '(')
         {
             int base = -1;
-            int32_t immS = 0;
-            if (!parseMemOperandParen(left, &base, &immS))
+            int32_t signedImm = 0;
+            int src = -1;
+
+            if (!readMemoryOperandParen(left, &base, &signedImm))
             {
-                freeWords(w);
-                stopBuild("mov store malformed memory operand");
+                freeTokenList(tokens);
+                failBuild("mov store malformed memory operand");
             }
 
-            int src = readReg(right);
+            src = readRegisterNumber(right);
             if (src < 0)
             {
-                freeWords(w);
-                stopBuild("mov store invalid source reg");
+                freeTokenList(tokens);
+                failBuild("mov store invalid source reg");
             }
 
-            freeWords(w);
-
-            /* FIXED: store encoding uses rd=base, rs=src (not rd=src) */
-            return packP(0x13, (uint32_t)base, (uint32_t)src, 0, (uint32_t)immS & 0xFFFu);
+            freeTokenList(tokens);
+            return encodePType(0x13, (uint32_t)base, (uint32_t)src, 0, (uint32_t)signedImm & 0xFFFu);
         }
 
-        /* Load: mov rDST, (rBASE)(imm) */
         if (right[0] == '(')
         {
-            int dst = readReg(left);
+            int dst = -1;
+            int base = -1;
+            int32_t signedImm = 0;
+
+            dst = readRegisterNumber(left);
             if (dst < 0)
             {
-                freeWords(w);
-                stopBuild("mov load invalid rd");
+                freeTokenList(tokens);
+                failBuild("mov load invalid rd");
             }
 
-            int base = -1;
-            int32_t immS = 0;
-            if (!parseMemOperandParen(right, &base, &immS))
+            if (!readMemoryOperandParen(right, &base, &signedImm))
             {
-                freeWords(w);
-                stopBuild("mov load malformed memory operand");
+                freeTokenList(tokens);
+                failBuild("mov load malformed memory operand");
             }
 
-            freeWords(w);
-            return packP(0x10, (uint32_t)dst, (uint32_t)base, 0, (uint32_t)immS & 0xFFFu);
+            freeTokenList(tokens);
+            return encodePType(0x10, (uint32_t)dst, (uint32_t)base, 0, (uint32_t)signedImm & 0xFFFu);
         }
 
-        /* mov rd, rs  OR mov rd, imm12 */
-        int dst = readReg(left);
-        if (dst < 0)
         {
-            freeWords(w);
-            stopBuild("mov invalid rd");
-        }
+            int dst = -1;
+            int src = -1;
+            uint32_t imm = 0;
 
-        int src = readReg(right);
-        if (src >= 0)
-        {
-            freeWords(w);
-            return packR(0x11, (uint32_t)dst, (uint32_t)src, 0);
-        }
+            dst = readRegisterNumber(left);
+            if (dst < 0)
+            {
+                freeTokenList(tokens);
+                failBuild("mov invalid rd");
+            }
 
-        uint32_t imm = 0;
-        if (!readU12Token(right, &imm))
-        {
-            freeWords(w);
-            stopBuild("mov rd, L: L must be 0..4095");
+            src = readRegisterNumber(right);
+            if (src >= 0)
+            {
+                freeTokenList(tokens);
+                return encodeRType(0x11, (uint32_t)dst, (uint32_t)src, 0);
+            }
+
+            if (!readUnsigned12(right, &imm))
+            {
+                freeTokenList(tokens);
+                failBuild("mov rd, L: L must be 0..4095");
+            }
+
+            freeTokenList(tokens);
+            return encodeIType(0x12, (uint32_t)dst, 0, imm);
         }
-        freeWords(w);
-        return packI(0x12, (uint32_t)dst, 0, imm);
     }
 
     {
-        char *mnCopy = copyText(mn);
-        freeWords(w);
-        stopBuildWithName("unknown instruction mnemonic %s", mnCopy);
+        char *mnCopy = duplicateText(mnemonic);
+        freeTokenList(tokens);
+        failBuildWithName("unknown instruction mnemonic %s", mnCopy);
     }
+
     return 0;
 }
 
-/* Expand any deferred ld-label items into the 12-instruction load macro */
-static void expandDeferredLdLabels(ItemList *code, const LabelTable *labels)
+static void expandLoadLabelRecords(ProgramRecordList *code, const SymbolTable *symbols)
 {
-    ItemList out;
-    out.items = NULL;
-    out.count = 0;
-    out.cap = 0;
+    ProgramRecordList expanded;
+    size_t i = 0;
 
-    for (size_t i = 0; i < code->count; i++)
+    expanded.items = NULL;
+    expanded.count = 0;
+    expanded.capacity = 0;
+
+    for (i = 0; i < code->count; i++)
     {
-        Item it = code->items[i];
+        ProgramRecord record = code->items[i];
 
-        if (it.kind != itemLdLabel)
+        if (record.type != recordLoadLabel)
         {
-            pushItem(&out, it);
+            appendRecord(&expanded, record);
             code->items[i].text = NULL;
-            continue;
         }
+        else
+        {
+            uint64_t target = 0;
+            uint64_t localPc = 0;
+            UnattachedLabels tempPending;
+            SymbolTable tempSymbols;
 
-        uint64_t target = 0;
-        if (!getLabel(labels, it.text, &target))
-            stopBuildWithName("ld: undefined label reference %s", it.text);
+            if (!findSymbol(symbols, record.text, &target))
+            {
+                failBuildWithName("ld: undefined label reference %s", record.text);
+            }
 
-        uint64_t pc = it.address;
+            localPc = record.address;
 
-        PendingLabels dummyPending;
-        dummyPending.names = NULL;
-        dummyPending.count = 0;
-        dummyPending.cap = 0;
+            tempPending.names = NULL;
+            tempPending.count = 0;
+            tempPending.capacity = 0;
 
-        /* We DO NOT want to mutate the real label table here. */
-        LabelTable dummyLabels;
-        dummyLabels.items = labels->items;
-        dummyLabels.count = labels->count;
-        dummyLabels.cap = labels->cap;
+            tempSymbols.items = symbols->items;
+            tempSymbols.count = symbols->count;
+            tempSymbols.capacity = symbols->capacity;
 
-        emitLoad64(&out, &pc, it.rd, target, &dummyPending, &dummyLabels);
+            emitLoadImmediate64(&expanded, &localPc, record.destReg, target, &tempPending, &tempSymbols);
 
-        pendingFree(&dummyPending);
-        free(it.text);
+            freeUnattachedLabels(&tempPending);
+            free(record.text);
+        }
     }
 
     free(code->items);
-    *code = out;
+    *code = expanded;
 }
 
-static void buildProgram(const char *inputPath, ItemList *code, ItemList *data, LabelTable *labels)
+static void buildFromSource(const char *inputPath, ProgramRecordList *code, ProgramRecordList *data, SymbolTable *symbols)
 {
-    FILE *f = fopen(inputPath, "r");
-    if (f == NULL)
-        stopBuildWithName("cannot open input file %s", inputPath);
+    FILE *file = NULL;
+    char rawLine[4096];
+    AssemblyPart currentPart = partNone;
+    uint64_t codePc = programCodeBase;
+    uint64_t dataPc = programDataBase;
+    UnattachedLabels pendingLabels;
+    bool sawCodeDirective = false;
 
-    char raw[4096];
-    Section mode = sectionNone;
-    uint64_t codePc = codeBase;
-    uint64_t dataPc = dataBase;
-    PendingLabels pending;
-    pending.names = NULL;
-    pending.count = 0;
-    pending.cap = 0;
-
-    bool sawCode = false;
-
-    while (fgets(raw, sizeof(raw), f) != NULL)
+    file = fopen(inputPath, "r");
+    if (file == NULL)
     {
-        trimEnd(raw);
-        cutComment(raw);
-        trimEnd(raw);
+        failBuildWithName("cannot open input file %s", inputPath);
+    }
 
-        const char *p = raw;
-        if (*p == 0)
-            continue;
+    pendingLabels.names = NULL;
+    pendingLabels.count = 0;
+    pendingLabels.capacity = 0;
 
-        if (startsWith(p, ".code"))
+    while (fgets(rawLine, sizeof(rawLine), file) != NULL)
+    {
+        const char *p = NULL;
+
+        rstripWhitespace(rawLine);
+        stripSemicolonComment(rawLine);
+        rstripWhitespace(rawLine);
+
+        p = rawLine;
+
+        if (*p == '\0')
         {
-            mode = sectionCode;
-            sawCode = true;
             continue;
         }
-        if (startsWith(p, ".data"))
+
+        if (hasPrefix(p, ".code"))
         {
-            mode = sectionData;
+            currentPart = partCode;
+            sawCodeDirective = true;
+            continue;
+        }
+
+        if (hasPrefix(p, ".data"))
+        {
+            currentPart = partData;
             continue;
         }
 
         if (p[0] == ':' || p[0] == '@')
         {
-            char *name = readLabelDefToken(p);
-            pendingAdd(&pending, name);
+            char *name = readLabelDefinition(p);
+            addUnattachedLabel(&pendingLabels, name);
             free(name);
             continue;
         }
 
         if (p[0] != '\t')
         {
-            fclose(f);
-            pendingFree(&pending);
-            stopBuild("code/data line must start with tab character");
+            fclose(file);
+            freeUnattachedLabels(&pendingLabels);
+            failBuild("code/data line must start with tab character");
         }
 
-        p = skipBlank(p);
-        if (*p == 0)
+        p = skipLeadingWhitespace(p);
+
+        if (*p == '\0')
+        {
             continue;
-
-        if (mode == sectionNone)
-        {
-            fclose(f);
-            pendingFree(&pending);
-            stopBuild("code/data line before any .code or .data directive");
         }
 
-        if (mode == sectionData)
+        if (currentPart == partNone)
         {
-            if ((p[0] == ':' || p[0] == '@') && p[1] != 0)
+            fclose(file);
+            freeUnattachedLabels(&pendingLabels);
+            failBuild("code/data line before any .code or .data directive");
+        }
+
+        if (currentPart == partData)
+        {
+            if ((p[0] == ':' || p[0] == '@') && p[1] != '\0')
             {
-                addDataLabelRef(data, dataPc, p + 1, &pending, labels);
+                addDataLabelReference(data, dataPc, p + 1, &pendingLabels, symbols);
                 dataPc += 8;
                 continue;
             }
 
-            uint64_t v = 0;
-            if (!readU64Token(p, &v))
             {
-                fclose(f);
-                pendingFree(&pending);
-                stopBuild("malformed data item; expected 64-bit unsigned integer");
+                uint64_t value = 0;
+                if (!readUnsigned64(p, &value))
+                {
+                    fclose(file);
+                    freeUnattachedLabels(&pendingLabels);
+                    failBuild("malformed data item; expected 64-bit unsigned integer");
+                }
+
+                addDataValue(data, dataPc, value, &pendingLabels, symbols);
+                dataPc += 8;
+                continue;
             }
-            addDataLiteral(data, dataPc, v, &pending, labels);
-            dataPc += 8;
-            continue;
         }
 
-        Words w = splitLine(p);
-        if (w.count == 0)
         {
-            freeWords(w);
-            continue;
-        }
+            TokenList tokens = splitTokens(p);
+            char mnemonic[64];
+            int i = 0;
 
-        for (char *c = w.items[0]; *c != 0; c++)
-            *c = (char)tolower((unsigned char)*c);
-
-        char mnemonic[64];
-        snprintf(mnemonic, sizeof(mnemonic), "%s", w.items[0]);
-
-        requireCommaStyle(p, mnemonic);
-        freeWords(w);
-
-        if (strcmp(mnemonic, "clr") == 0)
-        {
-            Words ww = splitLine(p);
-            if (ww.count != 2)
+            if (tokens.count == 0)
             {
-                freeWords(ww);
-                fclose(f);
-                pendingFree(&pending);
-                stopBuild("clr expects clr rd");
-            }
-            int rd = readReg(ww.items[1]);
-            if (rd < 0)
-            {
-                freeWords(ww);
-                fclose(f);
-                pendingFree(&pending);
-                stopBuild("clr invalid register");
-            }
-            freeWords(ww);
-            emitClear(code, &codePc, rd, &pending, labels);
-            continue;
-        }
-
-        if (strcmp(mnemonic, "halt") == 0)
-        {
-            /* FIXED: reject operands (invalid halt forms must error) */
-            Words ww = splitLine(p);
-            if (ww.count != 1)
-            {
-                freeWords(ww);
-                fclose(f);
-                pendingFree(&pending);
-                stopBuild("halt expects no operands");
-            }
-            freeWords(ww);
-            emitHalt(code, &codePc, &pending, labels);
-            continue;
-        }
-
-        if (strcmp(mnemonic, "in") == 0)
-        {
-            Words ww = splitLine(p);
-            if (ww.count != 3)
-            {
-                freeWords(ww);
-                fclose(f);
-                pendingFree(&pending);
-                stopBuild("in expects in rd, rs");
-            }
-            int rd = readReg(ww.items[1]);
-            int rs = readReg(ww.items[2]);
-            if (rd < 0 || rs < 0)
-            {
-                freeWords(ww);
-                fclose(f);
-                pendingFree(&pending);
-                stopBuild("in invalid register");
-            }
-            freeWords(ww);
-            emitIn(code, &codePc, rd, rs, &pending, labels);
-            continue;
-        }
-
-        if (strcmp(mnemonic, "out") == 0)
-        {
-            Words ww = splitLine(p);
-            if (ww.count != 3)
-            {
-                freeWords(ww);
-                fclose(f);
-                pendingFree(&pending);
-                stopBuild("out expects out rd, rs");
-            }
-            int rd = readReg(ww.items[1]);
-            int rs = readReg(ww.items[2]);
-            if (rd < 0 || rs < 0)
-            {
-                freeWords(ww);
-                fclose(f);
-                pendingFree(&pending);
-                stopBuild("out invalid register");
-            }
-            freeWords(ww);
-            emitOut(code, &codePc, rd, rs, &pending, labels);
-            continue;
-        }
-
-        if (strcmp(mnemonic, "push") == 0)
-        {
-            Words ww = splitLine(p);
-            if (ww.count != 2)
-            {
-                freeWords(ww);
-                fclose(f);
-                pendingFree(&pending);
-                stopBuild("push expects push rd");
-            }
-            int rd = readReg(ww.items[1]);
-            if (rd < 0)
-            {
-                freeWords(ww);
-                fclose(f);
-                pendingFree(&pending);
-                stopBuild("push invalid register");
-            }
-            freeWords(ww);
-            emitPush(code, &codePc, rd, &pending, labels);
-            continue;
-        }
-
-        if (strcmp(mnemonic, "pop") == 0)
-        {
-            Words ww = splitLine(p);
-            if (ww.count != 2)
-            {
-                freeWords(ww);
-                fclose(f);
-                pendingFree(&pending);
-                stopBuild("pop expects pop rd");
-            }
-            int rd = readReg(ww.items[1]);
-            if (rd < 0)
-            {
-                freeWords(ww);
-                fclose(f);
-                pendingFree(&pending);
-                stopBuild("pop invalid register");
-            }
-            freeWords(ww);
-            emitPop(code, &codePc, rd, &pending, labels);
-            continue;
-        }
-
-        if (strcmp(mnemonic, "ld") == 0)
-        {
-            Words ww = splitLine(p);
-            if (ww.count != 3)
-            {
-                freeWords(ww);
-                fclose(f);
-                pendingFree(&pending);
-                stopBuild("ld expects ld rd, valueOrLabel");
-            }
-            int rd = readReg(ww.items[1]);
-            if (rd < 0)
-            {
-                freeWords(ww);
-                fclose(f);
-                pendingFree(&pending);
-                stopBuild("ld invalid register");
-            }
-
-            if ((ww.items[2][0] == ':' || ww.items[2][0] == '@') && ww.items[2][1] != 0)
-            {
-                addLdLabel(code, codePc, rd, ww.items[2] + 1, &pending, labels);
-                codePc += 48;
-                freeWords(ww);
+                freeTokenList(tokens);
                 continue;
             }
 
-            uint64_t imm = 0;
-            if (!readU64Token(ww.items[2], &imm))
+            for (i = 0; tokens.items[0][i] != '\0'; i++)
             {
-                freeWords(ww);
-                fclose(f);
-                pendingFree(&pending);
-                stopBuild("ld invalid literal");
+                tokens.items[0][i] = (char)tolower((unsigned char)tokens.items[0][i]);
             }
-            freeWords(ww);
-            emitLoad64(code, &codePc, rd, imm, &pending, labels);
-            continue;
+
+            snprintf(mnemonic, sizeof(mnemonic), "%s", tokens.items[0]);
+
+            enforceCommaStyle(p, mnemonic);
+            freeTokenList(tokens);
+
+            if (strcmp(mnemonic, "clr") == 0)
+            {
+                TokenList t = splitTokens(p);
+                int rd = -1;
+
+                if (t.count != 2)
+                {
+                    freeTokenList(t);
+                    fclose(file);
+                    freeUnattachedLabels(&pendingLabels);
+                    failBuild("clr expects clr rd");
+                }
+
+                rd = readRegisterNumber(t.items[1]);
+                if (rd < 0)
+                {
+                    freeTokenList(t);
+                    fclose(file);
+                    freeUnattachedLabels(&pendingLabels);
+                    failBuild("clr invalid register");
+                }
+
+                freeTokenList(t);
+                emitClearRegister(code, &codePc, rd, &pendingLabels, symbols);
+                continue;
+            }
+
+            if (strcmp(mnemonic, "halt") == 0)
+            {
+                TokenList t = splitTokens(p);
+
+                if (t.count != 1)
+                {
+                    freeTokenList(t);
+                    fclose(file);
+                    freeUnattachedLabels(&pendingLabels);
+                    failBuild("halt expects no operands");
+                }
+
+                freeTokenList(t);
+                emitHaltInstruction(code, &codePc, &pendingLabels, symbols);
+                continue;
+            }
+
+            if (strcmp(mnemonic, "in") == 0)
+            {
+                TokenList t = splitTokens(p);
+                int rd = -1;
+                int rs = -1;
+
+                if (t.count != 3)
+                {
+                    freeTokenList(t);
+                    fclose(file);
+                    freeUnattachedLabels(&pendingLabels);
+                    failBuild("in expects in rd, rs");
+                }
+
+                rd = readRegisterNumber(t.items[1]);
+                rs = readRegisterNumber(t.items[2]);
+
+                if (rd < 0 || rs < 0)
+                {
+                    freeTokenList(t);
+                    fclose(file);
+                    freeUnattachedLabels(&pendingLabels);
+                    failBuild("in invalid register");
+                }
+
+                freeTokenList(t);
+                emitInputInstruction(code, &codePc, rd, rs, &pendingLabels, symbols);
+                continue;
+            }
+
+            if (strcmp(mnemonic, "out") == 0)
+            {
+                TokenList t = splitTokens(p);
+                int rd = -1;
+                int rs = -1;
+
+                if (t.count != 3)
+                {
+                    freeTokenList(t);
+                    fclose(file);
+                    freeUnattachedLabels(&pendingLabels);
+                    failBuild("out expects out rd, rs");
+                }
+
+                rd = readRegisterNumber(t.items[1]);
+                rs = readRegisterNumber(t.items[2]);
+
+                if (rd < 0 || rs < 0)
+                {
+                    freeTokenList(t);
+                    fclose(file);
+                    freeUnattachedLabels(&pendingLabels);
+                    failBuild("out invalid register");
+                }
+
+                freeTokenList(t);
+                emitOutputInstruction(code, &codePc, rd, rs, &pendingLabels, symbols);
+                continue;
+            }
+
+            if (strcmp(mnemonic, "push") == 0)
+            {
+                TokenList t = splitTokens(p);
+                int rd = -1;
+
+                if (t.count != 2)
+                {
+                    freeTokenList(t);
+                    fclose(file);
+                    freeUnattachedLabels(&pendingLabels);
+                    failBuild("push expects push rd");
+                }
+
+                rd = readRegisterNumber(t.items[1]);
+                if (rd < 0)
+                {
+                    freeTokenList(t);
+                    fclose(file);
+                    freeUnattachedLabels(&pendingLabels);
+                    failBuild("push invalid register");
+                }
+
+                freeTokenList(t);
+                emitPushRegister(code, &codePc, rd, &pendingLabels, symbols);
+                continue;
+            }
+
+            if (strcmp(mnemonic, "pop") == 0)
+            {
+                TokenList t = splitTokens(p);
+                int rd = -1;
+
+                if (t.count != 2)
+                {
+                    freeTokenList(t);
+                    fclose(file);
+                    freeUnattachedLabels(&pendingLabels);
+                    failBuild("pop expects pop rd");
+                }
+
+                rd = readRegisterNumber(t.items[1]);
+                if (rd < 0)
+                {
+                    freeTokenList(t);
+                    fclose(file);
+                    freeUnattachedLabels(&pendingLabels);
+                    failBuild("pop invalid register");
+                }
+
+                freeTokenList(t);
+                emitPopRegister(code, &codePc, rd, &pendingLabels, symbols);
+                continue;
+            }
+
+            if (strcmp(mnemonic, "ld") == 0)
+            {
+                TokenList t = splitTokens(p);
+                int rd = -1;
+
+                if (t.count != 3)
+                {
+                    freeTokenList(t);
+                    fclose(file);
+                    freeUnattachedLabels(&pendingLabels);
+                    failBuild("ld expects ld rd, valueOrLabel");
+                }
+
+                rd = readRegisterNumber(t.items[1]);
+                if (rd < 0)
+                {
+                    freeTokenList(t);
+                    fclose(file);
+                    freeUnattachedLabels(&pendingLabels);
+                    failBuild("ld invalid register");
+                }
+
+                if ((t.items[2][0] == ':' || t.items[2][0] == '@') && t.items[2][1] != '\0')
+                {
+                    addLoadLabelRecord(code, codePc, rd, t.items[2] + 1, &pendingLabels, symbols);
+                    codePc += 48;
+                    freeTokenList(t);
+                    continue;
+                }
+
+                {
+                    uint64_t imm = 0;
+                    if (!readUnsigned64(t.items[2], &imm))
+                    {
+                        freeTokenList(t);
+                        fclose(file);
+                        freeUnattachedLabels(&pendingLabels);
+                        failBuild("ld invalid literal");
+                    }
+
+                    freeTokenList(t);
+                    emitLoadImmediate64(code, &codePc, rd, imm, &pendingLabels, symbols);
+                    continue;
+                }
+            }
+
+            addInstructionText(code, codePc, p, &pendingLabels, symbols);
+            codePc += 4;
         }
-
-        addText(code, codePc, p, &pending, labels);
-        codePc += 4;
     }
 
-    fclose(f);
+    fclose(file);
 
-    if (pending.count != 0)
+    if (pendingLabels.count != 0)
     {
-        pendingFree(&pending);
-        stopBuild("label at end of file without following instruction/data");
+        freeUnattachedLabels(&pendingLabels);
+        failBuild("label at end of file without following instruction/data");
     }
-    pendingFree(&pending);
 
-    if (!sawCode)
-        stopBuild("program must have at least one .code directive");
+    freeUnattachedLabels(&pendingLabels);
 
-    expandDeferredLdLabels(code, labels);
+    if (!sawCodeDirective)
+    {
+        failBuild("program must have at least one .code directive");
+    }
+
+    expandLoadLabelRecords(code, symbols);
 }
 
-static uint32_t *assembleAll(const ItemList *code, const LabelTable *labels)
+static uint32_t *assembleProgramWords(const ProgramRecordList *code, const SymbolTable *symbols)
 {
-    uint32_t *out = (uint32_t *)malloc(sizeof(uint32_t) * code->count);
-    if (out == NULL)
-        stopBuild("out of memory");
+    uint32_t *words = NULL;
+    size_t i = 0;
 
-    for (size_t i = 0; i < code->count; i++)
+    words = (uint32_t *)malloc(sizeof(uint32_t) * code->count);
+    if (words == NULL)
     {
-        if (code->items[i].kind != itemInstruction)
-            stopBuild("internal error: non-instruction in code list");
-        out[i] = assembleInstruction(code->items[i].text, code->items[i].address, labels);
+        failBuild("out of memory");
     }
-    return out;
+
+    for (i = 0; i < code->count; i++)
+    {
+        if (code->items[i].type != recordInstruction)
+        {
+            failBuild("internal error: non-instruction in code list");
+        }
+        words[i] = assembleOneInstruction(code->items[i].text, code->items[i].address, symbols);
+    }
+
+    return words;
 }
 
-static void writeTko(const char *outPath, const ItemList *code, const ItemList *data, const uint32_t *words, const LabelTable *labels)
+static void writeOutputTko(const char *outputPath, const ProgramRecordList *code, const ProgramRecordList *data, const uint32_t *words, const SymbolTable *symbols)
 {
-    FILE *f = fopen(outPath, "wb");
-    if (f == NULL)
-        stopBuildWithName("cannot open output file %s", outPath);
-
+    FILE *file = NULL;
     uint64_t fileType = 0ULL;
-    uint64_t codeBegin = codeBase;
+    uint64_t codeBegin = programCodeBase;
     uint64_t codeSize = (uint64_t)code->count * 4ULL;
-    uint64_t dataBegin = dataBase;
+    uint64_t dataBegin = programDataBase;
     uint64_t dataSize = (uint64_t)data->count * 8ULL;
+    size_t i = 0;
 
-    writeU64LE(f, fileType);
-    writeU64LE(f, codeBegin);
-    writeU64LE(f, codeSize);
-    writeU64LE(f, dataBegin);
-    writeU64LE(f, dataSize);
+    file = fopen(outputPath, "wb");
+    if (file == NULL)
+    {
+        failBuildWithName("cannot open output file %s", outputPath);
+    }
 
-    for (size_t i = 0; i < code->count; i++)
-        writeU32LE(f, words[i]);
+    writeU64LittleEndian(file, fileType);
+    writeU64LittleEndian(file, codeBegin);
+    writeU64LittleEndian(file, codeSize);
+    writeU64LittleEndian(file, dataBegin);
+    writeU64LittleEndian(file, dataSize);
 
-    for (size_t i = 0; i < data->count; i++)
+    for (i = 0; i < code->count; i++)
+    {
+        writeU32LittleEndian(file, words[i]);
+    }
+
+    for (i = 0; i < data->count; i++)
     {
         if (data->items[i].text != NULL)
         {
-            uint64_t addr = 0;
-            if (!getLabel(labels, data->items[i].text, &addr))
+            uint64_t address = 0;
+
+            if (!findSymbol(symbols, data->items[i].text, &address))
             {
-                fclose(f);
-                stopBuildWithName("undefined label reference %s", data->items[i].text);
+                fclose(file);
+                failBuildWithName("undefined label reference %s", data->items[i].text);
             }
-            writeU64LE(f, addr);
+
+            writeU64LittleEndian(file, address);
         }
         else
         {
-            writeU64LE(f, data->items[i].data);
+            writeU64LittleEndian(file, data->items[i].data);
         }
     }
 
-    fclose(f);
+    fclose(file);
 }
 
 int main(int argc, char **argv)
 {
+    const char *inputPath = NULL;
+    const char *outputPath = NULL;
+
+    ProgramRecordList code;
+    ProgramRecordList data;
+    SymbolTable symbols;
+
+    uint32_t *words = NULL;
+
     if (argc != 3)
     {
         fprintf(stderr, "Usage: %s input.tk output.tko\n", argv[0]);
         return 1;
     }
 
-    const char *inputPath = argv[1];
-    const char *outputPath = argv[2];
+    inputPath = argv[1];
+    outputPath = argv[2];
 
-    ItemList code;
     code.items = NULL;
     code.count = 0;
-    code.cap = 0;
+    code.capacity = 0;
 
-    ItemList data;
     data.items = NULL;
     data.count = 0;
-    data.cap = 0;
+    data.capacity = 0;
 
-    LabelTable labels;
-    labels.items = NULL;
-    labels.count = 0;
-    labels.cap = 0;
+    symbols.items = NULL;
+    symbols.count = 0;
+    symbols.capacity = 0;
 
-    buildProgram(inputPath, &code, &data, &labels);
+    buildFromSource(inputPath, &code, &data, &symbols);
 
-    uint32_t *words = assembleAll(&code, &labels);
-    writeTko(outputPath, &code, &data, words, &labels);
+    words = assembleProgramWords(&code, &symbols);
+    writeOutputTko(outputPath, &code, &data, words, &symbols);
 
     free(words);
-    freeItems(&code);
-    freeItems(&data);
-    freeLabels(&labels);
+    freeRecordList(&code);
+    freeRecordList(&data);
+    freeSymbolTable(&symbols);
+
     return 0;
 }

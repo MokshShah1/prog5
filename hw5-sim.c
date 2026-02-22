@@ -5,52 +5,52 @@
 #include <string.h>
 #include <errno.h>
 
-static const uint64_t memoryBytes = 512ULL * 1024ULL;
-static const uint64_t expectedCodeBase = 0x2000ULL;
-static const uint64_t expectedDataBase = 0x10000ULL;
+static const uint64_t ramSizeBytes = 512ULL * 1024ULL;
+static const uint64_t requiredCodeBase = 0x2000ULL;
+static const uint64_t requiredDataBase = 0x10000ULL;
 
 typedef struct
 {
-    uint8_t *memory;
+    uint8_t *ram;
     uint64_t regs[32];
     uint64_t pc;
-    bool stopped;
-} Machine;
+    bool halted;
+} CpuState;
 
-typedef void (*OpFn)(Machine *, uint32_t);
+typedef void (*InstructionFn)(CpuState *, uint32_t);
 
-static void stopBadPath(void)
+static void failBadFilepath(void)
 {
     fprintf(stderr, "Invalid tinker filepath\n");
     exit(1);
 }
 
-static void stopSimError(void)
+static void failSimulation(void)
 {
     fprintf(stderr, "Simulation error\n");
     exit(1);
 }
 
-static uint64_t checkedAddress(int64_t signedAddress, uint64_t bytesNeeded)
+static uint64_t requireValidAddress(int64_t signedAddress, uint64_t bytesNeeded)
 {
     uint64_t address;
 
     if (signedAddress < 0)
     {
-        stopSimError();
+        failSimulation();
     }
 
     address = (uint64_t)signedAddress;
 
-    if (address + bytesNeeded > memoryBytes)
+    if (address + bytesNeeded > ramSizeBytes)
     {
-        stopSimError();
+        failSimulation();
     }
 
     return address;
 }
 
-static uint32_t readU32LE(Machine *m, uint64_t address)
+static uint32_t readU32LittleEndian(CpuState *cpu, uint64_t address)
 {
     uint32_t b0;
     uint32_t b1;
@@ -58,10 +58,10 @@ static uint32_t readU32LE(Machine *m, uint64_t address)
     uint32_t b3;
     uint32_t value;
 
-    b0 = (uint32_t)m->memory[address + 0];
-    b1 = (uint32_t)m->memory[address + 1];
-    b2 = (uint32_t)m->memory[address + 2];
-    b3 = (uint32_t)m->memory[address + 3];
+    b0 = (uint32_t)cpu->ram[address + 0];
+    b1 = (uint32_t)cpu->ram[address + 1];
+    b2 = (uint32_t)cpu->ram[address + 2];
+    b3 = (uint32_t)cpu->ram[address + 3];
 
     value = 0;
     value |= b0;
@@ -72,30 +72,30 @@ static uint32_t readU32LE(Machine *m, uint64_t address)
     return value;
 }
 
-static uint64_t readU64LE(Machine *m, uint64_t address)
+static uint64_t readU64LittleEndian(CpuState *cpu, uint64_t address)
 {
     uint64_t value;
     int i;
 
     value = 0;
     i = 0;
+
     while (i < 8)
     {
-        uint64_t byteValue;
+        uint64_t oneByte;
         uint64_t shift;
 
-        byteValue = (uint64_t)m->memory[address + (uint64_t)i];
+        oneByte = (uint64_t)cpu->ram[address + (uint64_t)i];
         shift = (uint64_t)(8 * i);
 
-        value |= (byteValue << shift);
-
+        value |= (oneByte << shift);
         i++;
     }
 
     return value;
 }
 
-static void writeU64LE(Machine *m, uint64_t address, uint64_t value)
+static void writeU64LittleEndian(CpuState *cpu, uint64_t address, uint64_t value)
 {
     int i;
 
@@ -108,13 +108,12 @@ static void writeU64LE(Machine *m, uint64_t address, uint64_t value)
         shift = (uint64_t)(8 * i);
         oneByte = (value >> shift) & 0xFFULL;
 
-        m->memory[address + (uint64_t)i] = (uint8_t)oneByte;
-
+        cpu->ram[address + (uint64_t)i] = (uint8_t)oneByte;
         i++;
     }
 }
 
-static int64_t signExtend12(uint32_t imm12)
+static int64_t signExtendImm12(uint32_t imm12)
 {
     uint32_t masked;
     int64_t result;
@@ -124,6 +123,7 @@ static int64_t signExtend12(uint32_t imm12)
     if ((masked & 0x800u) != 0u)
     {
         uint32_t extended;
+
         extended = masked | 0xFFFFF000u;
         result = (int64_t)(int32_t)extended;
         return result;
@@ -133,120 +133,127 @@ static int64_t signExtend12(uint32_t imm12)
     return result;
 }
 
-static uint32_t opcodeOf(uint32_t inst)
+static uint32_t getOpcode(uint32_t instruction)
 {
-    uint32_t v;
-    v = (inst >> 27) & 0x1Fu;
-    return v;
+    uint32_t value;
+
+    value = (instruction >> 27) & 0x1Fu;
+    return value;
 }
 
-static uint32_t rdOf(uint32_t inst)
+static uint32_t getRd(uint32_t instruction)
 {
-    uint32_t v;
-    v = (inst >> 22) & 0x1Fu;
-    return v;
+    uint32_t value;
+
+    value = (instruction >> 22) & 0x1Fu;
+    return value;
 }
 
-static uint32_t rsOf(uint32_t inst)
+static uint32_t getRs(uint32_t instruction)
 {
-    uint32_t v;
-    v = (inst >> 17) & 0x1Fu;
-    return v;
+    uint32_t value;
+
+    value = (instruction >> 17) & 0x1Fu;
+    return value;
 }
 
-static uint32_t rtOf(uint32_t inst)
+static uint32_t getRt(uint32_t instruction)
 {
-    uint32_t v;
-    v = (inst >> 12) & 0x1Fu;
-    return v;
+    uint32_t value;
+
+    value = (instruction >> 12) & 0x1Fu;
+    return value;
 }
 
-static uint32_t imm12Of(uint32_t inst)
+static uint32_t getImm12(uint32_t instruction)
 {
-    uint32_t v;
-    v = inst & 0xFFFu;
-    return v;
+    uint32_t value;
+
+    value = instruction & 0xFFFu;
+    return value;
 }
 
-static double bitsToDouble(uint64_t bits)
+static double bitsToFloat64(uint64_t bits)
 {
-    double v;
-    memcpy(&v, &bits, sizeof(v));
-    return v;
+    double value;
+
+    memcpy(&value, &bits, sizeof(value));
+    return value;
 }
 
-static uint64_t doubleToBits(double v)
+static uint64_t float64ToBits(double value)
 {
     uint64_t bits;
-    memcpy(&bits, &v, sizeof(bits));
+
+    memcpy(&bits, &value, sizeof(bits));
     return bits;
 }
 
-static uint64_t readU64FromStdinStrict(void)
+static uint64_t readUnsignedFromStdinStrict(void)
 {
-    char buf[256];
+    char text[256];
     char *end;
     unsigned long long parsed;
-    uint64_t out;
+    uint64_t result;
 
-    if (scanf("%255s", buf) != 1)
+    if (scanf("%255s", text) != 1)
     {
-        stopSimError();
+        failSimulation();
     }
 
-    if (buf[0] == '-' || buf[0] == '+')
+    if (text[0] == '-' || text[0] == '+')
     {
-        stopSimError();
+        failSimulation();
     }
 
     errno = 0;
     end = NULL;
-    parsed = strtoull(buf, &end, 10);
+    parsed = strtoull(text, &end, 10);
 
     if (errno != 0)
     {
-        stopSimError();
+        failSimulation();
     }
 
     if (end == NULL)
     {
-        stopSimError();
+        failSimulation();
     }
 
     if (*end != '\0')
     {
-        stopSimError();
+        failSimulation();
     }
 
-    out = (uint64_t)parsed;
-    return out;
+    result = (uint64_t)parsed;
+    return result;
 }
 
-static uint64_t readU64LEFromFile(FILE *f)
+static uint64_t readU64LittleEndianFromFile(FILE *file)
 {
-    uint8_t b[8];
+    uint8_t bytes[8];
     size_t got;
     uint64_t value;
     int i;
 
-    got = fread(b, 1, 8, f);
+    got = fread(bytes, 1, 8, file);
     if (got != 8)
     {
-        stopBadPath();
+        failBadFilepath();
     }
 
     value = 0;
     i = 0;
     while (i < 8)
     {
-        value |= ((uint64_t)b[i]) << (uint64_t)(8 * i);
+        value |= ((uint64_t)bytes[i]) << (uint64_t)(8 * i);
         i++;
     }
 
     return value;
 }
 
-static void readExactly(FILE *f, uint8_t *dst, uint64_t count)
+static void readExactBytes(FILE *file, uint8_t *dst, uint64_t count)
 {
     size_t got;
 
@@ -255,302 +262,302 @@ static void readExactly(FILE *f, uint8_t *dst, uint64_t count)
         return;
     }
 
-    got = fread(dst, 1, (size_t)count, f);
+    got = fread(dst, 1, (size_t)count, file);
     if (got != (size_t)count)
     {
-        stopBadPath();
+        failBadFilepath();
     }
 }
 
-static void loadTko(Machine *m, const char *path)
+static void loadProgramImage(CpuState *cpu, const char *path)
 {
-    FILE *f;
+    FILE *file;
     uint64_t fileType;
-    uint64_t codeBegin;
-    uint64_t codeSize;
-    uint64_t dataBegin;
-    uint64_t dataSize;
+    uint64_t codeBase;
+    uint64_t codeBytes;
+    uint64_t dataBase;
+    uint64_t dataBytes;
 
     uint64_t codeEnd;
     uint64_t dataEnd;
 
-    f = fopen(path, "rb");
-    if (f == NULL)
+    file = fopen(path, "rb");
+    if (file == NULL)
     {
-        stopBadPath();
+        failBadFilepath();
     }
 
-    fileType = readU64LEFromFile(f);
-    codeBegin = readU64LEFromFile(f);
-    codeSize = readU64LEFromFile(f);
-    dataBegin = readU64LEFromFile(f);
-    dataSize = readU64LEFromFile(f);
+    fileType = readU64LittleEndianFromFile(file);
+    codeBase = readU64LittleEndianFromFile(file);
+    codeBytes = readU64LittleEndianFromFile(file);
+    dataBase = readU64LittleEndianFromFile(file);
+    dataBytes = readU64LittleEndianFromFile(file);
 
     if (fileType != 0ULL)
     {
-        fclose(f);
-        stopSimError();
+        fclose(file);
+        failSimulation();
     }
 
-    if (codeBegin != expectedCodeBase)
+    if (codeBase != requiredCodeBase)
     {
-        fclose(f);
-        stopSimError();
+        fclose(file);
+        failSimulation();
     }
 
-    if (dataBegin != expectedDataBase)
+    if (dataBase != requiredDataBase)
     {
-        fclose(f);
-        stopSimError();
+        fclose(file);
+        failSimulation();
     }
 
-    if ((codeSize % 4ULL) != 0ULL)
+    if ((codeBytes % 4ULL) != 0ULL)
     {
-        fclose(f);
-        stopSimError();
+        fclose(file);
+        failSimulation();
     }
 
-    if ((dataSize % 8ULL) != 0ULL)
+    if ((dataBytes % 8ULL) != 0ULL)
     {
-        fclose(f);
-        stopSimError();
+        fclose(file);
+        failSimulation();
     }
 
-    codeEnd = codeBegin + codeSize;
-    dataEnd = dataBegin + dataSize;
+    codeEnd = codeBase + codeBytes;
+    dataEnd = dataBase + dataBytes;
 
-    if (codeEnd > memoryBytes)
+    if (codeEnd > ramSizeBytes)
     {
-        fclose(f);
-        stopSimError();
+        fclose(file);
+        failSimulation();
     }
 
-    if (dataEnd > memoryBytes)
+    if (dataEnd > ramSizeBytes)
     {
-        fclose(f);
-        stopSimError();
+        fclose(file);
+        failSimulation();
     }
 
-    if (codeSize != 0ULL && dataSize != 0ULL)
+    if (codeBytes != 0ULL && dataBytes != 0ULL)
     {
-        if (codeBegin < dataEnd && dataBegin < codeEnd)
+        if (codeBase < dataEnd && dataBase < codeEnd)
         {
-            fclose(f);
-            stopSimError();
+            fclose(file);
+            failSimulation();
         }
     }
 
-    readExactly(f, m->memory + codeBegin, codeSize);
-    readExactly(f, m->memory + dataBegin, dataSize);
+    readExactBytes(file, cpu->ram + codeBase, codeBytes);
+    readExactBytes(file, cpu->ram + dataBase, dataBytes);
 
-    fclose(f);
+    fclose(file);
 
-    m->pc = codeBegin;
+    cpu->pc = codeBase;
 }
 
-static void opIllegal(Machine *m, uint32_t inst)
+static void executeIllegal(CpuState *cpu, uint32_t instruction)
 {
-    (void)m;
-    (void)inst;
-    stopSimError();
+    (void)cpu;
+    (void)instruction;
+    failSimulation();
 }
 
-static void opAnd(Machine *m, uint32_t inst)
-{
-    uint32_t rd;
-    uint32_t rs;
-    uint32_t rt;
-
-    rd = rdOf(inst);
-    rs = rsOf(inst);
-    rt = rtOf(inst);
-
-    m->regs[rd] = m->regs[rs] & m->regs[rt];
-    m->pc = m->pc + 4;
-}
-
-static void opOr(Machine *m, uint32_t inst)
+static void executeAnd(CpuState *cpu, uint32_t instruction)
 {
     uint32_t rd;
     uint32_t rs;
     uint32_t rt;
 
-    rd = rdOf(inst);
-    rs = rsOf(inst);
-    rt = rtOf(inst);
+    rd = getRd(instruction);
+    rs = getRs(instruction);
+    rt = getRt(instruction);
 
-    m->regs[rd] = m->regs[rs] | m->regs[rt];
-    m->pc = m->pc + 4;
+    cpu->regs[rd] = cpu->regs[rs] & cpu->regs[rt];
+    cpu->pc = cpu->pc + 4;
 }
 
-static void opXor(Machine *m, uint32_t inst)
+static void executeOr(CpuState *cpu, uint32_t instruction)
 {
     uint32_t rd;
     uint32_t rs;
     uint32_t rt;
 
-    rd = rdOf(inst);
-    rs = rsOf(inst);
-    rt = rtOf(inst);
+    rd = getRd(instruction);
+    rs = getRs(instruction);
+    rt = getRt(instruction);
 
-    m->regs[rd] = m->regs[rs] ^ m->regs[rt];
-    m->pc = m->pc + 4;
+    cpu->regs[rd] = cpu->regs[rs] | cpu->regs[rt];
+    cpu->pc = cpu->pc + 4;
 }
 
-static void opNot(Machine *m, uint32_t inst)
-{
-    uint32_t rd;
-    uint32_t rs;
-
-    rd = rdOf(inst);
-    rs = rsOf(inst);
-
-    m->regs[rd] = ~m->regs[rs];
-    m->pc = m->pc + 4;
-}
-
-static void opShiftRightReg(Machine *m, uint32_t inst)
+static void executeXor(CpuState *cpu, uint32_t instruction)
 {
     uint32_t rd;
     uint32_t rs;
     uint32_t rt;
-    uint64_t amount;
 
-    rd = rdOf(inst);
-    rs = rsOf(inst);
-    rt = rtOf(inst);
+    rd = getRd(instruction);
+    rs = getRs(instruction);
+    rt = getRt(instruction);
 
-    amount = m->regs[rt] & 63ULL;
-    m->regs[rd] = m->regs[rs] >> amount;
-    m->pc = m->pc + 4;
+    cpu->regs[rd] = cpu->regs[rs] ^ cpu->regs[rt];
+    cpu->pc = cpu->pc + 4;
 }
 
-static void opShiftRightImm(Machine *m, uint32_t inst)
+static void executeNot(CpuState *cpu, uint32_t instruction)
 {
     uint32_t rd;
-    uint64_t amount;
+    uint32_t rs;
 
-    rd = rdOf(inst);
+    rd = getRd(instruction);
+    rs = getRs(instruction);
 
-    amount = (uint64_t)(imm12Of(inst) & 63u);
-    m->regs[rd] = m->regs[rd] >> amount;
-    m->pc = m->pc + 4;
+    cpu->regs[rd] = ~cpu->regs[rs];
+    cpu->pc = cpu->pc + 4;
 }
 
-static void opShiftLeftReg(Machine *m, uint32_t inst)
+static void executeShiftRightRegister(CpuState *cpu, uint32_t instruction)
 {
     uint32_t rd;
     uint32_t rs;
     uint32_t rt;
-    uint64_t amount;
+    uint64_t shiftAmount;
 
-    rd = rdOf(inst);
-    rs = rsOf(inst);
-    rt = rtOf(inst);
+    rd = getRd(instruction);
+    rs = getRs(instruction);
+    rt = getRt(instruction);
 
-    amount = m->regs[rt] & 63ULL;
-    m->regs[rd] = m->regs[rs] << amount;
-    m->pc = m->pc + 4;
+    shiftAmount = cpu->regs[rt] & 63ULL;
+    cpu->regs[rd] = cpu->regs[rs] >> shiftAmount;
+    cpu->pc = cpu->pc + 4;
 }
 
-static void opShiftLeftImm(Machine *m, uint32_t inst)
+static void executeShiftRightImmediate(CpuState *cpu, uint32_t instruction)
 {
     uint32_t rd;
-    uint64_t amount;
+    uint64_t shiftAmount;
 
-    rd = rdOf(inst);
+    rd = getRd(instruction);
 
-    amount = (uint64_t)(imm12Of(inst) & 63u);
-    m->regs[rd] = m->regs[rd] << amount;
-    m->pc = m->pc + 4;
+    shiftAmount = (uint64_t)(getImm12(instruction) & 63u);
+    cpu->regs[rd] = cpu->regs[rd] >> shiftAmount;
+    cpu->pc = cpu->pc + 4;
 }
 
-static void opBranchAbs(Machine *m, uint32_t inst)
+static void executeShiftLeftRegister(CpuState *cpu, uint32_t instruction)
+{
+    uint32_t rd;
+    uint32_t rs;
+    uint32_t rt;
+    uint64_t shiftAmount;
+
+    rd = getRd(instruction);
+    rs = getRs(instruction);
+    rt = getRt(instruction);
+
+    shiftAmount = cpu->regs[rt] & 63ULL;
+    cpu->regs[rd] = cpu->regs[rs] << shiftAmount;
+    cpu->pc = cpu->pc + 4;
+}
+
+static void executeShiftLeftImmediate(CpuState *cpu, uint32_t instruction)
+{
+    uint32_t rd;
+    uint64_t shiftAmount;
+
+    rd = getRd(instruction);
+
+    shiftAmount = (uint64_t)(getImm12(instruction) & 63u);
+    cpu->regs[rd] = cpu->regs[rd] << shiftAmount;
+    cpu->pc = cpu->pc + 4;
+}
+
+static void executeBranchAbsolute(CpuState *cpu, uint32_t instruction)
 {
     uint32_t rd;
 
-    rd = rdOf(inst);
-    m->pc = m->regs[rd];
+    rd = getRd(instruction);
+    cpu->pc = cpu->regs[rd];
 }
 
-static void opBranchRelReg(Machine *m, uint32_t inst)
+static void executeBranchRelativeRegister(CpuState *cpu, uint32_t instruction)
 {
     uint32_t rd;
     uint64_t offset;
 
-    rd = rdOf(inst);
-    offset = m->regs[rd];
+    rd = getRd(instruction);
+    offset = cpu->regs[rd];
 
-    m->pc = m->pc + offset;
+    cpu->pc = cpu->pc + offset;
 }
 
-static void opBranchRelImm(Machine *m, uint32_t inst)
+static void executeBranchRelativeImmediate(CpuState *cpu, uint32_t instruction)
 {
     int64_t offset;
-    uint64_t newPc;
+    uint64_t nextPc;
 
-    offset = signExtend12(imm12Of(inst));
-    newPc = (uint64_t)((int64_t)m->pc + offset);
+    offset = signExtendImm12(getImm12(instruction));
+    nextPc = (uint64_t)((int64_t)cpu->pc + offset);
 
-    m->pc = newPc;
+    cpu->pc = nextPc;
 }
 
-static void opBranchNotZero(Machine *m, uint32_t inst)
+static void executeBranchNotZero(CpuState *cpu, uint32_t instruction)
 {
     uint32_t rd;
     uint32_t rs;
 
-    rd = rdOf(inst);
-    rs = rsOf(inst);
+    rd = getRd(instruction);
+    rs = getRs(instruction);
 
-    if (m->regs[rs] == 0ULL)
+    if (cpu->regs[rs] == 0ULL)
     {
-        m->pc = m->pc + 4;
+        cpu->pc = cpu->pc + 4;
     }
     else
     {
-        m->pc = m->regs[rd];
+        cpu->pc = cpu->regs[rd];
     }
 }
 
-static void opCall(Machine *m, uint32_t inst)
+static void executeCall(CpuState *cpu, uint32_t instruction)
 {
     uint32_t rd;
-    uint64_t sp;
-    int64_t addrSigned;
-    uint64_t addr;
+    uint64_t stackPointer;
+    int64_t returnAddrSlotSigned;
+    uint64_t returnAddrSlot;
 
-    rd = rdOf(inst);
-    sp = m->regs[31];
+    rd = getRd(instruction);
+    stackPointer = cpu->regs[31];
 
-    addrSigned = (int64_t)sp - 8;
-    addr = checkedAddress(addrSigned, 8);
+    returnAddrSlotSigned = (int64_t)stackPointer - 8;
+    returnAddrSlot = requireValidAddress(returnAddrSlotSigned, 8);
 
-    writeU64LE(m, addr, m->pc + 4);
+    writeU64LittleEndian(cpu, returnAddrSlot, cpu->pc + 4);
 
-    m->pc = m->regs[rd];
+    cpu->pc = cpu->regs[rd];
 }
 
-static void opReturn(Machine *m, uint32_t inst)
+static void executeReturn(CpuState *cpu, uint32_t instruction)
 {
-    uint64_t sp;
-    int64_t addrSigned;
-    uint64_t addr;
+    uint64_t stackPointer;
+    int64_t returnAddrSlotSigned;
+    uint64_t returnAddrSlot;
     uint64_t returnPc;
 
-    (void)inst;
+    (void)instruction;
 
-    sp = m->regs[31];
+    stackPointer = cpu->regs[31];
 
-    addrSigned = (int64_t)sp - 8;
-    addr = checkedAddress(addrSigned, 8);
+    returnAddrSlotSigned = (int64_t)stackPointer - 8;
+    returnAddrSlot = requireValidAddress(returnAddrSlotSigned, 8);
 
-    returnPc = readU64LE(m, addr);
+    returnPc = readU64LittleEndian(cpu, returnAddrSlot);
 
-    m->pc = returnPc;
+    cpu->pc = returnPc;
 }
 
-static void opBranchGreaterThan(Machine *m, uint32_t inst)
+static void executeBranchGreaterThan(CpuState *cpu, uint32_t instruction)
 {
     uint32_t rd;
     uint32_t rs;
@@ -558,76 +565,75 @@ static void opBranchGreaterThan(Machine *m, uint32_t inst)
     int64_t left;
     int64_t right;
 
-    rd = rdOf(inst);
-    rs = rsOf(inst);
-    rt = rtOf(inst);
+    rd = getRd(instruction);
+    rs = getRs(instruction);
+    rt = getRt(instruction);
 
-    left = (int64_t)m->regs[rs];
-    right = (int64_t)m->regs[rt];
+    left = (int64_t)cpu->regs[rs];
+    right = (int64_t)cpu->regs[rt];
 
     if (left > right)
     {
-        m->pc = m->regs[rd];
+        cpu->pc = cpu->regs[rd];
     }
     else
     {
-        m->pc = m->pc + 4;
+        cpu->pc = cpu->pc + 4;
     }
 }
 
-static void opPriv(Machine *m, uint32_t inst)
+static void executePrivileged(CpuState *cpu, uint32_t instruction)
 {
     uint32_t rd;
     uint32_t rs;
     uint32_t imm;
-    uint64_t inPort;
-    uint64_t outPort;
+    uint64_t portValue;
 
-    rd = rdOf(inst);
-    rs = rsOf(inst);
-    imm = imm12Of(inst);
+    rd = getRd(instruction);
+    rs = getRs(instruction);
+    imm = getImm12(instruction);
 
     if (imm == 0u)
     {
-        m->stopped = true;
+        cpu->halted = true;
         return;
     }
 
     if (imm == 3u)
     {
-        inPort = m->regs[rs];
+        portValue = cpu->regs[rs];
 
-        if (inPort == 0ULL)
+        if (portValue == 0ULL)
         {
-            m->regs[rd] = readU64FromStdinStrict();
+            cpu->regs[rd] = readUnsignedFromStdinStrict();
         }
 
-        m->pc = m->pc + 4;
+        cpu->pc = cpu->pc + 4;
         return;
     }
 
     if (imm == 4u)
     {
-        outPort = m->regs[rd];
+        portValue = cpu->regs[rd];
 
-        if (outPort == 1ULL)
+        if (portValue == 1ULL)
         {
-            printf("%llu\n", (unsigned long long)m->regs[rs]);
+            printf("%llu\n", (unsigned long long)cpu->regs[rs]);
         }
-        else if (outPort == 3ULL)
+        else if (portValue == 3ULL)
         {
-            putchar((int)(m->regs[rs] & 0xFFULL));
+            putchar((int)(cpu->regs[rs] & 0xFFULL));
             fflush(stdout);
         }
 
-        m->pc = m->pc + 4;
+        cpu->pc = cpu->pc + 4;
         return;
     }
 
-    stopSimError();
+    failSimulation();
 }
 
-static void opLoad(Machine *m, uint32_t inst)
+static void executeLoad(CpuState *cpu, uint32_t instruction)
 {
     uint32_t rd;
     uint32_t rs;
@@ -635,48 +641,48 @@ static void opLoad(Machine *m, uint32_t inst)
     int64_t addrSigned;
     uint64_t addr;
 
-    rd = rdOf(inst);
-    rs = rsOf(inst);
+    rd = getRd(instruction);
+    rs = getRs(instruction);
 
-    offset = signExtend12(imm12Of(inst));
-    addrSigned = (int64_t)m->regs[rs] + offset;
-    addr = checkedAddress(addrSigned, 8);
+    offset = signExtendImm12(getImm12(instruction));
+    addrSigned = (int64_t)cpu->regs[rs] + offset;
+    addr = requireValidAddress(addrSigned, 8);
 
-    m->regs[rd] = readU64LE(m, addr);
-    m->pc = m->pc + 4;
+    cpu->regs[rd] = readU64LittleEndian(cpu, addr);
+    cpu->pc = cpu->pc + 4;
 }
 
-static void opMoveReg(Machine *m, uint32_t inst)
+static void executeMoveRegister(CpuState *cpu, uint32_t instruction)
 {
     uint32_t rd;
     uint32_t rs;
 
-    rd = rdOf(inst);
-    rs = rsOf(inst);
+    rd = getRd(instruction);
+    rs = getRs(instruction);
 
-    m->regs[rd] = m->regs[rs];
-    m->pc = m->pc + 4;
+    cpu->regs[rd] = cpu->regs[rs];
+    cpu->pc = cpu->pc + 4;
 }
 
-static void opMoveImm(Machine *m, uint32_t inst)
+static void executeMoveImmediate(CpuState *cpu, uint32_t instruction)
 {
     uint32_t rd;
     uint32_t imm;
-    uint64_t before;
-    uint64_t after;
+    uint64_t current;
+    uint64_t updated;
 
-    rd = rdOf(inst);
-    imm = imm12Of(inst);
+    rd = getRd(instruction);
+    imm = getImm12(instruction);
 
-    before = m->regs[rd];
-    after = before & ~0xFFFULL;
-    after = after | ((uint64_t)imm & 0xFFFULL);
+    current = cpu->regs[rd];
+    updated = current & ~0xFFFULL;
+    updated = updated | ((uint64_t)imm & 0xFFFULL);
 
-    m->regs[rd] = after;
-    m->pc = m->pc + 4;
+    cpu->regs[rd] = updated;
+    cpu->pc = cpu->pc + 4;
 }
 
-static void opStore(Machine *m, uint32_t inst)
+static void executeStore(CpuState *cpu, uint32_t instruction)
 {
     uint32_t rd;
     uint32_t rs;
@@ -684,313 +690,313 @@ static void opStore(Machine *m, uint32_t inst)
     int64_t addrSigned;
     uint64_t addr;
 
-    rd = rdOf(inst);
-    rs = rsOf(inst);
+    rd = getRd(instruction);
+    rs = getRs(instruction);
 
-    offset = signExtend12(imm12Of(inst));
-    addrSigned = (int64_t)m->regs[rd] + offset;
-    addr = checkedAddress(addrSigned, 8);
+    offset = signExtendImm12(getImm12(instruction));
+    addrSigned = (int64_t)cpu->regs[rd] + offset;
+    addr = requireValidAddress(addrSigned, 8);
 
-    writeU64LE(m, addr, m->regs[rs]);
-    m->pc = m->pc + 4;
+    writeU64LittleEndian(cpu, addr, cpu->regs[rs]);
+    cpu->pc = cpu->pc + 4;
 }
 
-static void opAddF(Machine *m, uint32_t inst)
+static void executeAddFloat(CpuState *cpu, uint32_t instruction)
 {
     uint32_t rd;
     uint32_t rs;
     uint32_t rt;
     double a;
     double b;
-    double c;
+    double result;
 
-    rd = rdOf(inst);
-    rs = rsOf(inst);
-    rt = rtOf(inst);
+    rd = getRd(instruction);
+    rs = getRs(instruction);
+    rt = getRt(instruction);
 
-    a = bitsToDouble(m->regs[rs]);
-    b = bitsToDouble(m->regs[rt]);
-    c = a + b;
+    a = bitsToFloat64(cpu->regs[rs]);
+    b = bitsToFloat64(cpu->regs[rt]);
+    result = a + b;
 
-    m->regs[rd] = doubleToBits(c);
-    m->pc = m->pc + 4;
+    cpu->regs[rd] = float64ToBits(result);
+    cpu->pc = cpu->pc + 4;
 }
 
-static void opSubF(Machine *m, uint32_t inst)
+static void executeSubFloat(CpuState *cpu, uint32_t instruction)
 {
     uint32_t rd;
     uint32_t rs;
     uint32_t rt;
     double a;
     double b;
-    double c;
+    double result;
 
-    rd = rdOf(inst);
-    rs = rsOf(inst);
-    rt = rtOf(inst);
+    rd = getRd(instruction);
+    rs = getRs(instruction);
+    rt = getRt(instruction);
 
-    a = bitsToDouble(m->regs[rs]);
-    b = bitsToDouble(m->regs[rt]);
-    c = a - b;
+    a = bitsToFloat64(cpu->regs[rs]);
+    b = bitsToFloat64(cpu->regs[rt]);
+    result = a - b;
 
-    m->regs[rd] = doubleToBits(c);
-    m->pc = m->pc + 4;
+    cpu->regs[rd] = float64ToBits(result);
+    cpu->pc = cpu->pc + 4;
 }
 
-static void opMulF(Machine *m, uint32_t inst)
+static void executeMulFloat(CpuState *cpu, uint32_t instruction)
 {
     uint32_t rd;
     uint32_t rs;
     uint32_t rt;
     double a;
     double b;
-    double c;
+    double result;
 
-    rd = rdOf(inst);
-    rs = rsOf(inst);
-    rt = rtOf(inst);
+    rd = getRd(instruction);
+    rs = getRs(instruction);
+    rt = getRt(instruction);
 
-    a = bitsToDouble(m->regs[rs]);
-    b = bitsToDouble(m->regs[rt]);
-    c = a * b;
+    a = bitsToFloat64(cpu->regs[rs]);
+    b = bitsToFloat64(cpu->regs[rt]);
+    result = a * b;
 
-    m->regs[rd] = doubleToBits(c);
-    m->pc = m->pc + 4;
+    cpu->regs[rd] = float64ToBits(result);
+    cpu->pc = cpu->pc + 4;
 }
 
-static void opDivF(Machine *m, uint32_t inst)
+static void executeDivFloat(CpuState *cpu, uint32_t instruction)
 {
     uint32_t rd;
     uint32_t rs;
     uint32_t rt;
     double a;
     double b;
-    double c;
+    double result;
 
-    rd = rdOf(inst);
-    rs = rsOf(inst);
-    rt = rtOf(inst);
+    rd = getRd(instruction);
+    rs = getRs(instruction);
+    rt = getRt(instruction);
 
-    a = bitsToDouble(m->regs[rs]);
-    b = bitsToDouble(m->regs[rt]);
+    a = bitsToFloat64(cpu->regs[rs]);
+    b = bitsToFloat64(cpu->regs[rt]);
 
     if (b == 0.0)
     {
-        stopSimError();
+        failSimulation();
     }
 
-    c = a / b;
+    result = a / b;
 
-    m->regs[rd] = doubleToBits(c);
-    m->pc = m->pc + 4;
+    cpu->regs[rd] = float64ToBits(result);
+    cpu->pc = cpu->pc + 4;
 }
 
-static void opAddI(Machine *m, uint32_t inst)
+static void executeAddInt(CpuState *cpu, uint32_t instruction)
 {
     uint32_t rd;
     uint32_t rs;
     uint32_t rt;
     int64_t a;
     int64_t b;
-    int64_t c;
+    int64_t result;
 
-    rd = rdOf(inst);
-    rs = rsOf(inst);
-    rt = rtOf(inst);
+    rd = getRd(instruction);
+    rs = getRs(instruction);
+    rt = getRt(instruction);
 
-    a = (int64_t)m->regs[rs];
-    b = (int64_t)m->regs[rt];
-    c = a + b;
+    a = (int64_t)cpu->regs[rs];
+    b = (int64_t)cpu->regs[rt];
+    result = a + b;
 
-    m->regs[rd] = (uint64_t)c;
-    m->pc = m->pc + 4;
+    cpu->regs[rd] = (uint64_t)result;
+    cpu->pc = cpu->pc + 4;
 }
 
-static void opAddImm(Machine *m, uint32_t inst)
+static void executeAddImmediate(CpuState *cpu, uint32_t instruction)
 {
     uint32_t rd;
     uint32_t imm;
 
-    rd = rdOf(inst);
-    imm = imm12Of(inst);
+    rd = getRd(instruction);
+    imm = getImm12(instruction);
 
-    m->regs[rd] = m->regs[rd] + (uint64_t)imm;
-    m->pc = m->pc + 4;
+    cpu->regs[rd] = cpu->regs[rd] + (uint64_t)imm;
+    cpu->pc = cpu->pc + 4;
 }
 
-static void opSubI(Machine *m, uint32_t inst)
+static void executeSubInt(CpuState *cpu, uint32_t instruction)
 {
     uint32_t rd;
     uint32_t rs;
     uint32_t rt;
     int64_t a;
     int64_t b;
-    int64_t c;
+    int64_t result;
 
-    rd = rdOf(inst);
-    rs = rsOf(inst);
-    rt = rtOf(inst);
+    rd = getRd(instruction);
+    rs = getRs(instruction);
+    rt = getRt(instruction);
 
-    a = (int64_t)m->regs[rs];
-    b = (int64_t)m->regs[rt];
-    c = a - b;
+    a = (int64_t)cpu->regs[rs];
+    b = (int64_t)cpu->regs[rt];
+    result = a - b;
 
-    m->regs[rd] = (uint64_t)c;
-    m->pc = m->pc + 4;
+    cpu->regs[rd] = (uint64_t)result;
+    cpu->pc = cpu->pc + 4;
 }
 
-static void opSubImm(Machine *m, uint32_t inst)
+static void executeSubImmediate(CpuState *cpu, uint32_t instruction)
 {
     uint32_t rd;
     uint32_t imm;
 
-    rd = rdOf(inst);
-    imm = imm12Of(inst);
+    rd = getRd(instruction);
+    imm = getImm12(instruction);
 
-    m->regs[rd] = m->regs[rd] - (uint64_t)imm;
-    m->pc = m->pc + 4;
+    cpu->regs[rd] = cpu->regs[rd] - (uint64_t)imm;
+    cpu->pc = cpu->pc + 4;
 }
 
-static void opMulI(Machine *m, uint32_t inst)
+static void executeMulInt(CpuState *cpu, uint32_t instruction)
 {
     uint32_t rd;
     uint32_t rs;
     uint32_t rt;
     int64_t a;
     int64_t b;
-    int64_t c;
+    int64_t result;
 
-    rd = rdOf(inst);
-    rs = rsOf(inst);
-    rt = rtOf(inst);
+    rd = getRd(instruction);
+    rs = getRs(instruction);
+    rt = getRt(instruction);
 
-    a = (int64_t)m->regs[rs];
-    b = (int64_t)m->regs[rt];
-    c = a * b;
+    a = (int64_t)cpu->regs[rs];
+    b = (int64_t)cpu->regs[rt];
+    result = a * b;
 
-    m->regs[rd] = (uint64_t)c;
-    m->pc = m->pc + 4;
+    cpu->regs[rd] = (uint64_t)result;
+    cpu->pc = cpu->pc + 4;
 }
 
-static void opDivI(Machine *m, uint32_t inst)
+static void executeDivInt(CpuState *cpu, uint32_t instruction)
 {
     uint32_t rd;
     uint32_t rs;
     uint32_t rt;
     int64_t a;
     int64_t b;
-    int64_t c;
+    int64_t result;
 
-    rd = rdOf(inst);
-    rs = rsOf(inst);
-    rt = rtOf(inst);
+    rd = getRd(instruction);
+    rs = getRs(instruction);
+    rt = getRt(instruction);
 
-    a = (int64_t)m->regs[rs];
-    b = (int64_t)m->regs[rt];
+    a = (int64_t)cpu->regs[rs];
+    b = (int64_t)cpu->regs[rt];
 
     if (b == 0)
     {
-        stopSimError();
+        failSimulation();
     }
 
-    c = a / b;
+    result = a / b;
 
-    m->regs[rd] = (uint64_t)c;
-    m->pc = m->pc + 4;
+    cpu->regs[rd] = (uint64_t)result;
+    cpu->pc = cpu->pc + 4;
 }
 
-static void buildOps(OpFn ops[32])
+static void buildInstructionTable(InstructionFn table[32])
 {
     int i;
 
     i = 0;
     while (i < 32)
     {
-        ops[i] = opIllegal;
+        table[i] = executeIllegal;
         i++;
     }
 
-    ops[0x00] = opAnd;
-    ops[0x01] = opOr;
-    ops[0x02] = opXor;
-    ops[0x03] = opNot;
+    table[0x00] = executeAnd;
+    table[0x01] = executeOr;
+    table[0x02] = executeXor;
+    table[0x03] = executeNot;
 
-    ops[0x04] = opShiftRightReg;
-    ops[0x05] = opShiftRightImm;
-    ops[0x06] = opShiftLeftReg;
-    ops[0x07] = opShiftLeftImm;
+    table[0x04] = executeShiftRightRegister;
+    table[0x05] = executeShiftRightImmediate;
+    table[0x06] = executeShiftLeftRegister;
+    table[0x07] = executeShiftLeftImmediate;
 
-    ops[0x08] = opBranchAbs;
-    ops[0x09] = opBranchRelReg;
-    ops[0x0A] = opBranchRelImm;
-    ops[0x0B] = opBranchNotZero;
-    ops[0x0C] = opCall;
-    ops[0x0D] = opReturn;
-    ops[0x0E] = opBranchGreaterThan;
+    table[0x08] = executeBranchAbsolute;
+    table[0x09] = executeBranchRelativeRegister;
+    table[0x0A] = executeBranchRelativeImmediate;
+    table[0x0B] = executeBranchNotZero;
+    table[0x0C] = executeCall;
+    table[0x0D] = executeReturn;
+    table[0x0E] = executeBranchGreaterThan;
 
-    ops[0x0F] = opPriv;
+    table[0x0F] = executePrivileged;
 
-    ops[0x10] = opLoad;
-    ops[0x11] = opMoveReg;
-    ops[0x12] = opMoveImm;
-    ops[0x13] = opStore;
+    table[0x10] = executeLoad;
+    table[0x11] = executeMoveRegister;
+    table[0x12] = executeMoveImmediate;
+    table[0x13] = executeStore;
 
-    ops[0x14] = opAddF;
-    ops[0x15] = opSubF;
-    ops[0x16] = opMulF;
-    ops[0x17] = opDivF;
+    table[0x14] = executeAddFloat;
+    table[0x15] = executeSubFloat;
+    table[0x16] = executeMulFloat;
+    table[0x17] = executeDivFloat;
 
-    ops[0x18] = opAddI;
-    ops[0x19] = opAddImm;
-    ops[0x1A] = opSubI;
-    ops[0x1B] = opSubImm;
-    ops[0x1C] = opMulI;
-    ops[0x1D] = opDivI;
+    table[0x18] = executeAddInt;
+    table[0x19] = executeAddImmediate;
+    table[0x1A] = executeSubInt;
+    table[0x1B] = executeSubImmediate;
+    table[0x1C] = executeMulInt;
+    table[0x1D] = executeDivInt;
 }
 
-static void run(Machine *m)
+static void runMachine(CpuState *cpu)
 {
-    OpFn ops[32];
+    InstructionFn instructions[32];
 
-    buildOps(ops);
+    buildInstructionTable(instructions);
 
-    while (m->stopped == false)
+    while (cpu->halted == false)
     {
         uint64_t safePc;
-        uint32_t inst;
-        uint32_t op;
+        uint32_t instruction;
+        uint32_t opcode;
 
-        safePc = checkedAddress((int64_t)m->pc, 4);
-        inst = readU32LE(m, safePc);
+        safePc = requireValidAddress((int64_t)cpu->pc, 4);
+        instruction = readU32LittleEndian(cpu, safePc);
 
-        op = opcodeOf(inst);
-        ops[op](m, inst);
+        opcode = getOpcode(instruction);
+        instructions[opcode](cpu, instruction);
     }
 }
 
 int main(int argc, char **argv)
 {
-    Machine m;
-    uint8_t *memory;
+    CpuState cpu;
+    uint8_t *ram;
 
     if (argc != 2)
     {
-        stopBadPath();
+        failBadFilepath();
     }
 
-    memory = (uint8_t *)calloc((size_t)memoryBytes, 1);
-    if (memory == NULL)
+    ram = (uint8_t *)calloc((size_t)ramSizeBytes, 1);
+    if (ram == NULL)
     {
-        stopSimError();
+        failSimulation();
     }
 
-    memset(&m, 0, sizeof(m));
-    m.memory = memory;
-    m.regs[31] = memoryBytes;
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.ram = ram;
+    cpu.regs[31] = ramSizeBytes;
 
-    loadTko(&m, argv[1]);
-    run(&m);
+    loadProgramImage(&cpu, argv[1]);
+    runMachine(&cpu);
 
-    free(memory);
+    free(ram);
     return 0;
 }
