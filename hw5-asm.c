@@ -874,7 +874,7 @@ static uint32_t assembleInstruction(const char *instText, uint64_t pc, const Lab
                 stopBuildWithName("undefined label reference: %s", labelCopy);
             }
 
-            int64_t delta = (int64_t)target - (int64_t)(pc + 4);
+            int64_t delta = (int64_t)target - (int64_t)pc;
             if (delta < -2048 || delta > 2047)
             {
                 free(labelCopy);
